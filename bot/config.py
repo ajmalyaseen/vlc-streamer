@@ -10,6 +10,7 @@ class Config:
     log_channel: int       # private channel ID where files are stored (negative, e.g. -1001234567890)
     base_url: str          # public URL of this service, e.g. https://my-app.koyeb.app
     hash_secret: str       # used to sign stream URLs
+    session_string: str = ""  # optional: reuse an existing login across restarts
     port: int = 8080
     bind_host: str = "0.0.0.0"
     workers: int = 4
@@ -30,6 +31,7 @@ def load_config() -> Config:
         base_url=_require("BASE_URL").rstrip("/"),
         hash_secret=_require("HASH_SECRET"),
         log_channel=int(os.environ.get("LOG_CHANNEL", "0") or "0"),
+        session_string=os.environ.get("SESSION_STRING", ""),
         port=int(os.environ.get("PORT", "8080")),
         bind_host=os.environ.get("BIND_HOST", "0.0.0.0"),
         workers=int(os.environ.get("WORKERS", "4")),
