@@ -23,12 +23,19 @@ def _require(name: str) -> str:
     return val
 
 
+def _normalize_base_url(raw: str) -> str:
+    url = raw.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
 def load_config() -> Config:
     return Config(
         api_id=int(_require("API_ID")),
         api_hash=_require("API_HASH"),
         bot_token=_require("BOT_TOKEN"),
-        base_url=_require("BASE_URL").rstrip("/"),
+        base_url=_normalize_base_url(_require("BASE_URL")),
         hash_secret=_require("HASH_SECRET"),
         log_channel=int(os.environ.get("LOG_CHANNEL", "0") or "0"),
         session_string=os.environ.get("SESSION_STRING", ""),
