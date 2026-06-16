@@ -118,6 +118,7 @@ def make_app(bot: Client, cfg: Config) -> web.Application:
     app["config"] = cfg
     app.router.add_get("/", index)
     app.router.add_get("/healthz", healthz)
+    # add_get also registers HEAD automatically (allow_head=True by default),
+    # and our handler checks request.method == "HEAD".
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
-    app.router.add_head("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     return app
