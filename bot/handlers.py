@@ -36,22 +36,27 @@ def register_handlers(app: Client, cfg: Config) -> None:
         if media is None:
             return
 
-        # Copy into the log channel so we get a stable, permanent message_id
-        # we can fetch later when serving the stream.
-        try:
-            stored = await m.copy(cfg.log_channel)
-        except Exception as e:
-            log.exception("copy to log channel failed: %s", e)
-            await m.reply_text(
-                "Couldn't store the file. Make sure the bot is an admin of the "
-                "LOG_CHANNEL with permission to post messages."
-            )
-            return
+        if cfg.log_channel:
+            # Channel mode: copy into the log channel for permanent storage.
+            try:
+                stored = await m.copy(cfg.log_channel)
+            except Exception as e:
+                log.exception("copy to log channel failed: %s", e)
+                await m.reply_text(
+                    "Couldn't store the file. Make sure the bot is an admin of "
+                    "the LOG_CHANNEL with permission to post messages."
+                )
+                return
+            chat_id = cfg.log_channel
+            msg_id = stored.id
+        else:
+            # No-channel mode: stream straight from the message the user sent.
+            chat_id = m.chat.id
+            msg_id = m.id
 
-        msg_id = stored.id
-        token = make_token(msg_id, cfg.hash_secret)
+        token = make_token(chat_id, msg_id, cfg.hash_secret)
         file_name = getattr(media, "file_name", None) or f"file_{msg_id}.mp4"
-        url = f"{cfg.base_url}/stream/{msg_id}/{quote(file_name)}?hash={token}"
+        url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
 
         await m.reply_text(
             f"**File:** `{file_name}`\n"
