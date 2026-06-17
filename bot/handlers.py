@@ -78,7 +78,9 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
     @app.on_message(filters.command("start") & filters.private)
     async def on_start(_c: Client, m: Message):
         if m.from_user:
-            await db.add_user(m.from_user.id)
+            await db.add_user(
+                m.from_user.id, m.from_user.username, m.from_user.first_name
+            )
         name = m.from_user.mention if m.from_user else "there"
         await m.reply_text(
             start_text(name),
@@ -93,6 +95,31 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
             return
         total = await db.count()
         await m.reply_text(f"📊 **Total users:** {total}", quote=True)
+
+    @app.on_message(filters.command("users") & filters.private)
+    async def on_users(_c: Client, m: Message):
+        if not m.from_user or m.from_user.id not in cfg.admins:
+            return
+        users = await db.all_users_detailed()
+        if not users:
+            await m.reply_text("No users yet.", quote=True)
+            return
+        lines = []
+        for u in users:
+            uid = u.get("_id")
+            uname = u.get("username")
+            fname = u.get("first_name") or ""
+            handle = f"@{uname}" if uname else "(no username)"
+            lines.append(f"• `{uid}` — {handle} {fname}".strip())
+        text = "👥 **Users**\n\n" + "\n".join(lines)
+        # Telegram messages cap at 4096 chars; send as a file if too long.
+        if len(text) > 4000:
+            import io
+            buf = io.BytesIO("\n".join(lines).encode())
+            buf.name = "users.txt"
+            await m.reply_document(buf, caption=f"👥 {len(users)} users", quote=True)
+        else:
+            await m.reply_text(text, quote=True)
 
     @app.on_message(filters.command("broadcast") & filters.private)
     async def on_broadcast(_c: Client, m: Message):
@@ -176,7 +203,9 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
         if media is None:
             return
         if m.from_user:
-            await db.add_user(m.from_user.id)
+            await db.add_user(
+                m.from_user.id, m.from_user.username, m.from_user.first_name
+            )
 
         if cfg.log_channel:
             # Channel mode: copy into the log channel for permanent storage.
