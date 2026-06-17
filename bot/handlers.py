@@ -2,29 +2,110 @@ import logging
 from urllib.parse import quote
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from .config import Config
 from .utils import human_size, make_token
 
 log = logging.getLogger("handlers")
 
-WELCOME = (
-    "Hi! Send me a video file (MP4 / MKV / etc.) and I'll reply with a direct "
-    "streaming link you can open in VLC.\n\n"
-    "In VLC: Media → Open Network Stream → paste the link."
+DEVELOPER = "Ajmal Yaseen"
+
+
+def start_text(name: str) -> str:
+    return (
+        f"👋 Hai {name},\n\n"
+        "I am a **File to VLC Stream Link** bot.\n"
+        "Send me any video file (MP4 / MKV) and I'll give you a direct "
+        "streaming link you can open in VLC.\n\n"
+        f"✨ Maintained by **{DEVELOPER}**"
+    )
+
+
+HELP_TEXT = (
+    "💡 **How to use**\n\n"
+    "1. Send me a video file (MP4 / MKV / etc.).\n"
+    "2. I'll reply with a direct streaming link.\n"
+    "3. Open **VLC → Media → Open Network Stream**, paste the link and play.\n\n"
+    "The link supports seeking, so you can jump around in the video."
 )
+
+ABOUT_TEXT = (
+    "📂 **About Me**\n\n"
+    "❄ **Bot Name :** VLC Streamer\n"
+    "❄ **Framework :** Pyrogram\n"
+    "❄ **Language :** Python\n"
+    "❄ **Source Code :** Private\n"
+    f"❄ **Developer :** {DEVELOPER}"
+)
+
+
+def start_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("💡 Help", callback_data="help"),
+                InlineKeyboardButton("📂 About", callback_data="about"),
+            ],
+            [InlineKeyboardButton("🔐 Close", callback_data="close")],
+        ]
+    )
+
+
+def back_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("◀ Back", callback_data="back"),
+                InlineKeyboardButton("🔐 Close", callback_data="close"),
+            ]
+        ]
+    )
 
 
 def register_handlers(app: Client, cfg: Config) -> None:
     @app.on_message(filters.command("start") & filters.private)
     async def on_start(_c: Client, m: Message):
-        await m.reply_text(WELCOME)
+        name = m.from_user.mention if m.from_user else "there"
+        await m.reply_text(
+            start_text(name),
+            reply_markup=start_markup(),
+            disable_web_page_preview=True,
+            quote=True,
+        )
+
+    @app.on_callback_query()
+    async def on_callback(_c: Client, cq: CallbackQuery):
+        data = cq.data
+        if data == "help":
+            await cq.message.edit_text(
+                HELP_TEXT, reply_markup=back_markup(), disable_web_page_preview=True
+            )
+        elif data == "about":
+            await cq.message.edit_text(
+                ABOUT_TEXT, reply_markup=back_markup(), disable_web_page_preview=True
+            )
+        elif data == "back":
+            name = cq.from_user.mention if cq.from_user else "there"
+            await cq.message.edit_text(
+                start_text(name),
+                reply_markup=start_markup(),
+                disable_web_page_preview=True,
+            )
+        elif data == "close":
+            try:
+                await cq.message.delete()
+            except Exception:
+                pass
+        await cq.answer()
 
     @app.on_message(filters.command("id"))
     async def on_id(_c: Client, m: Message):
-        # Useful when setting up: forward a message from the log channel to
-        # the bot, or run /id inside the channel via the bot to find chat_id.
         await m.reply_text(f"chat id: `{m.chat.id}`", quote=True)
 
     @app.on_message(
