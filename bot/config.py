@@ -13,6 +13,8 @@ class Config:
     session_string: str = ""  # optional: reuse an existing login across restarts
     database_url: str = ""    # optional MongoDB URL for persistent user storage
     admins: tuple = ()        # Telegram user IDs allowed to run /stats, /broadcast
+    force_sub: str = ""       # channel username/id users must join (bot must be admin)
+    force_sub_invite: str = ""  # join link for the button (defaults to t.me/<username>)
     port: int = 8080
     bind_host: str = "0.0.0.0"
     workers: int = 4
@@ -53,6 +55,8 @@ def load_config() -> Config:
         session_string=os.environ.get("SESSION_STRING", ""),
         database_url=os.environ.get("DATABASE_URL", ""),
         admins=_parse_admins(os.environ.get("ADMINS", "")),
+        force_sub=os.environ.get("FORCE_SUB_CHANNEL", "").strip(),
+        force_sub_invite=os.environ.get("FORCE_SUB_INVITE", "").strip(),
         port=int(os.environ.get("PORT", "8080")),
         bind_host=os.environ.get("BIND_HOST", "0.0.0.0"),
         workers=int(os.environ.get("WORKERS", "4")),

@@ -3,7 +3,8 @@ import logging
 from urllib.parse import quote
 
 from pyrogram import Client, filters
-from pyrogram.errors import FloodWait
+from pyrogram.enums import ChatMemberStatus
+from pyrogram.errors import FloodWait, UserNotParticipant
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -71,6 +72,84 @@ def back_markup() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🔐 Close", callback_data="close"),
             ]
         ]
+    )
+
+
+def _invite_link(cfg: Config) -> str:
+    if cfg.force_sub_invite:
+        return cfg.force_sub_invite
+    return f"https://t.me/{cfg.force_sub.lstrip('@')}"
+
+
+def fsub_markup(cfg: Config, file_msg_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📢 Join Channel", url=_invite_link(cfg))],
+            [InlineKeyboardButton("🔄 I've Joined", callback_data=f"checksub_{file_msg_id}")],
+        ]
+    )
+
+
+async def is_subscribed(client: Client, cfg: Config, user_id: int) -> bool:
+    """True if force-sub is off, or the user is a member of the channel."""
+    if not cfg.force_sub:
+        return True
+    try:
+        member = await client.get_chat_member(cfg.force_sub, user_id)
+        return member.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED)
+    except UserNotParticipant:
+        return False
+    except Exception:
+        # Misconfig (e.g. bot not admin in channel) shouldn't lock everyone out.
+        log.exception("force-sub check failed; allowing access")
+        return True
+
+
+async def send_stream_link(client: Client, cfg: Config, file_message: Message, reply_to: Message) -> None:
+    """Generate and send the stream link + Watch Now button for a media message."""
+    media = (
+        file_message.document
+        or file_message.video
+        or file_message.audio
+        or file_message.animation
+    )
+    if media is None:
+        await reply_to.reply_text("That message has no streamable file.", quote=True)
+        return
+
+    if cfg.log_channel:
+        try:
+            stored = await file_message.copy(cfg.log_channel)
+        except Exception as e:
+            log.exception("copy to log channel failed: %s", e)
+            await reply_to.reply_text(
+                "Couldn't store the file. Make sure the bot is an admin of "
+                "the LOG_CHANNEL with permission to post messages.",
+                quote=True,
+            )
+            return
+        chat_id = cfg.log_channel
+        msg_id = stored.id
+    else:
+        chat_id = file_message.chat.id
+        msg_id = file_message.id
+
+    token = make_token(chat_id, msg_id, cfg.hash_secret)
+    file_name = getattr(media, "file_name", None) or f"file_{msg_id}.mp4"
+    url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
+    watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
+
+    await reply_to.reply_text(
+        f"**File:** `{file_name}`\n"
+        f"**Size:** {human_size(media.file_size)}\n\n"
+        f"**Stream link:**\n`{url}`\n\n"
+        f"Tap **▶️ Watch Now** to open directly in VLC, or paste the link "
+        f"in VLC →  Media → Open Network Stream",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("▶️ Watch Now", url=watch_url)]]
+        ),
+        disable_web_page_preview=True,
+        quote=True,
     )
 
 
@@ -196,6 +275,28 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
                 await cq.message.delete()
             except Exception:
                 pass
+        elif data.startswith("checksub_"):
+            file_msg_id = int(data.split("_", 1)[1])
+            if not await is_subscribed(_c, cfg, cq.from_user.id):
+                await cq.answer(
+                    "❌ You haven't joined yet. Please join the channel first.",
+                    show_alert=True,
+                )
+                return
+            await cq.answer("✅ Verified!")
+            try:
+                file_message = await _c.get_messages(cq.from_user.id, file_msg_id)
+            except Exception:
+                file_message = None
+            try:
+                await cq.message.delete()
+            except Exception:
+                pass
+            if file_message and not file_message.empty:
+                await send_stream_link(_c, cfg, file_message, file_message)
+            else:
+                await _c.send_message(cq.from_user.id, "Please send the file again.")
+            return
         await cq.answer()
 
     @app.on_message(filters.command("id"))
@@ -215,38 +316,16 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
                 m.from_user.id, m.from_user.username, m.from_user.first_name
             )
 
-        if cfg.log_channel:
-            # Channel mode: copy into the log channel for permanent storage.
-            try:
-                stored = await m.copy(cfg.log_channel)
-            except Exception as e:
-                log.exception("copy to log channel failed: %s", e)
-                await m.reply_text(
-                    "Couldn't store the file. Make sure the bot is an admin of "
-                    "the LOG_CHANNEL with permission to post messages."
-                )
-                return
-            chat_id = cfg.log_channel
-            msg_id = stored.id
-        else:
-            # No-channel mode: stream straight from the message the user sent.
-            chat_id = m.chat.id
-            msg_id = m.id
+        # Force-subscribe gate.
+        user_id = m.from_user.id if m.from_user else 0
+        if not await is_subscribed(client, cfg, user_id):
+            await m.reply_text(
+                "🚫 **Access Denied**\n\n"
+                "Please join our channel to use this bot.\n"
+                "After joining, tap **🔄 I've Joined** and I'll send your link.",
+                reply_markup=fsub_markup(cfg, m.id),
+                quote=True,
+            )
+            return
 
-        token = make_token(chat_id, msg_id, cfg.hash_secret)
-        file_name = getattr(media, "file_name", None) or f"file_{msg_id}.mp4"
-        url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
-        watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
-
-        await m.reply_text(
-            f"**File:** `{file_name}`\n"
-            f"**Size:** {human_size(media.file_size)}\n\n"
-            f"**Stream link:**\n`{url}`\n\n"
-            f"Tap **▶️ Watch Now** to open directly in VLC, or paste the link "
-            f"in VLC →  Media → Open Network Stream",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("▶️ Watch Now", url=watch_url)]]
-            ),
-            disable_web_page_preview=True,
-            quote=True,
-        )
+        await send_stream_link(client, cfg, m, m)
