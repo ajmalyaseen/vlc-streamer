@@ -16,6 +16,7 @@ log = logging.getLogger("handlers")
 
 DEVELOPER = "Ajmal Yaseen"
 CHANNEL_LINK = "https://t.me/alaska_in"
+VERSION = "v1.0.0"
 
 
 def start_text(name: str) -> str:
@@ -41,6 +42,7 @@ ABOUT_TEXT = (
     "❄ **Bot Name :** VLC Streamer\n"
     "❄ **Framework :** Pyrogram\n"
     "❄ **Language :** Python\n"
+    f"❄ **Version :** {VERSION}\n"
     "❄ **Source Code :** Private\n"
     f"❄ **Developer :** {DEVELOPER}"
 )
@@ -151,12 +153,17 @@ def register_handlers(app: Client, cfg: Config) -> None:
         token = make_token(chat_id, msg_id, cfg.hash_secret)
         file_name = getattr(media, "file_name", None) or f"file_{msg_id}.mp4"
         url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
+        watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
 
         await m.reply_text(
             f"**File:** `{file_name}`\n"
             f"**Size:** {human_size(media.file_size)}\n\n"
             f"**Stream link:**\n`{url}`\n\n"
-            f"Open in VLC → _Media_ → _Open Network Stream_.",
+            f"Tap **▶️ Watch Now** to open directly in VLC, or paste the link "
+            f"in VLC → _Media_ → _Open Network Stream_.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("▶️ Watch Now", url=watch_url)]]
+            ),
             disable_web_page_preview=True,
             quote=True,
         )
