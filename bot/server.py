@@ -52,18 +52,40 @@ WATCH_PAGE = """<!doctype html>
   var ua = navigator.userAgent || "";
   var isiOS = /iPad|iPhone|iPod/.test(ua);
   var isAndroid = /Android/.test(ua);
+  var PLAY = "https://play.google.com/store/apps/details?id=org.videolan.vlc";
+  var APPSTORE = "https://apps.apple.com/app/vlc-media-player/id650377962";
   var vlcLink;
   if (isiOS) {{
     vlcLink = "vlc-x-callback://x-callback-url/stream?url=" + encodeURIComponent(stream);
   }} else if (isAndroid) {{
     var noScheme = stream.replace(/^https?:\\/\\//, "");
     vlcLink = "intent://" + noScheme +
-              "#Intent;scheme=https;package=org.videolan.vlc;type=video/*;end";
+              "#Intent;scheme=https;package=org.videolan.vlc;type=video/*;" +
+              "S.browser_fallback_url=" + encodeURIComponent(PLAY) + ";end";
   }} else {{
     vlcLink = stream;
   }}
   document.getElementById("vlc").href = vlcLink;
-  if (isiOS || isAndroid) {{ window.location.href = vlcLink; }}
+
+  if (isAndroid) {{
+    // The intent's browser_fallback_url sends users to the Play Store
+    // automatically when VLC isn't installed.
+    window.location.href = vlcLink;
+  }} else if (isiOS) {{
+    // If VLC opens, the page is backgrounded and the timer is cancelled.
+    // Otherwise we assume it's not installed and go to the App Store.
+    var start = Date.now();
+    var timer = setTimeout(function() {{
+      if (!document.hidden && Date.now() - start < 2500) {{
+        window.location.href = APPSTORE;
+      }}
+    }}, 1500);
+    window.addEventListener("pagehide", function() {{ clearTimeout(timer); }});
+    document.addEventListener("visibilitychange", function() {{
+      if (document.hidden) {{ clearTimeout(timer); }}
+    }});
+    window.location.href = vlcLink;
+  }}
 </script>
 </body>
 </html>"""

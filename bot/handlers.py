@@ -51,6 +51,7 @@ ABOUT_TEXT = (
 def start_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK)],
             [
                 InlineKeyboardButton("💡 Help", callback_data="help"),
                 InlineKeyboardButton("📂 About", callback_data="about"),
@@ -160,7 +161,7 @@ def register_handlers(app: Client, cfg: Config) -> None:
             f"**Size:** {human_size(media.file_size)}\n\n"
             f"**Stream link:**\n`{url}`\n\n"
             f"Tap **▶️ Watch Now** to open directly in VLC, or paste the link "
-            f"in VLC → _Media_ → _Open Network Stream_.",
+            f"in VLC →  Media → Open Network Stream",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("▶️ Watch Now", url=watch_url)]]
             ),
