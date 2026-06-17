@@ -8,6 +8,7 @@ from pyrogram.errors import FloodWait
 from pyrogram.types import BotCommand
 
 from .config import load_config
+from .db import make_user_db
 from .handlers import register_handlers
 from .server import make_app
 
@@ -73,7 +74,8 @@ async def run() -> None:
         client_kwargs["bot_token"] = cfg.bot_token
 
     bot = Client(**client_kwargs)
-    register_handlers(bot, cfg)
+    db = make_user_db(cfg.database_url)
+    register_handlers(bot, cfg, db)
 
     # 1) Start the HTTP server FIRST so Koyeb health checks pass immediately,
     #    even if the bot login is briefly delayed by a FloodWait.

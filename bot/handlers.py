@@ -1,7 +1,9 @@
+import asyncio
 import logging
 from urllib.parse import quote
 
 from pyrogram import Client, filters
+from pyrogram.errors import FloodWait
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -72,15 +74,56 @@ def back_markup() -> InlineKeyboardMarkup:
     )
 
 
-def register_handlers(app: Client, cfg: Config) -> None:
+def register_handlers(app: Client, cfg: Config, db) -> None:
     @app.on_message(filters.command("start") & filters.private)
     async def on_start(_c: Client, m: Message):
+        if m.from_user:
+            await db.add_user(m.from_user.id)
         name = m.from_user.mention if m.from_user else "there"
         await m.reply_text(
             start_text(name),
             reply_markup=start_markup(),
             disable_web_page_preview=True,
             quote=True,
+        )
+
+    @app.on_message(filters.command("stats") & filters.private)
+    async def on_stats(_c: Client, m: Message):
+        if not m.from_user or m.from_user.id not in cfg.admins:
+            return
+        total = await db.count()
+        await m.reply_text(f"📊 **Total users:** {total}", quote=True)
+
+    @app.on_message(filters.command("broadcast") & filters.private)
+    async def on_broadcast(_c: Client, m: Message):
+        if not m.from_user or m.from_user.id not in cfg.admins:
+            return
+        if not m.reply_to_message:
+            await m.reply_text(
+                "Reply to a message with /broadcast to send it to all users.",
+                quote=True,
+            )
+            return
+
+        users = await db.all_users()
+        status = await m.reply_text(f"📢 Broadcasting to {len(users)} users...", quote=True)
+        sent = failed = 0
+        for uid in users:
+            try:
+                await m.reply_to_message.copy(uid)
+                sent += 1
+            except FloodWait as e:
+                await asyncio.sleep(int(e.value) + 1)
+                try:
+                    await m.reply_to_message.copy(uid)
+                    sent += 1
+                except Exception:
+                    failed += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)
+        await status.edit_text(
+            f"📢 **Broadcast done.**\n✅ Sent: {sent}\n❌ Failed: {failed}"
         )
 
     @app.on_message(filters.command("help") & filters.private)
@@ -132,6 +175,8 @@ def register_handlers(app: Client, cfg: Config) -> None:
         media = m.document or m.video or m.audio or m.animation
         if media is None:
             return
+        if m.from_user:
+            await db.add_user(m.from_user.id)
 
         if cfg.log_channel:
             # Channel mode: copy into the log channel for permanent storage.

@@ -11,6 +11,8 @@ class Config:
     base_url: str          # public URL of this service, e.g. https://my-app.koyeb.app
     hash_secret: str       # used to sign stream URLs
     session_string: str = ""  # optional: reuse an existing login across restarts
+    database_url: str = ""    # optional MongoDB URL for persistent user storage
+    admins: tuple = ()        # Telegram user IDs allowed to run /stats, /broadcast
     port: int = 8080
     bind_host: str = "0.0.0.0"
     workers: int = 4
@@ -30,6 +32,16 @@ def _normalize_base_url(raw: str) -> str:
     return url
 
 
+def _parse_admins(raw: str) -> tuple:
+    ids = []
+    for part in raw.replace(",", " ").split():
+        try:
+            ids.append(int(part))
+        except ValueError:
+            pass
+    return tuple(ids)
+
+
 def load_config() -> Config:
     return Config(
         api_id=int(_require("API_ID")),
@@ -39,6 +51,8 @@ def load_config() -> Config:
         hash_secret=_require("HASH_SECRET"),
         log_channel=int(os.environ.get("LOG_CHANNEL", "0") or "0"),
         session_string=os.environ.get("SESSION_STRING", ""),
+        database_url=os.environ.get("DATABASE_URL", ""),
+        admins=_parse_admins(os.environ.get("ADMINS", "")),
         port=int(os.environ.get("PORT", "8080")),
         bind_host=os.environ.get("BIND_HOST", "0.0.0.0"),
         workers=int(os.environ.get("WORKERS", "4")),

@@ -1,3 +1,4 @@
 Pyrogram==2.0.106
 TgCrypto==1.2.5
 aiohttp==3.10.11
+motor==3.5.1
