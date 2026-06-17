@@ -99,6 +99,10 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
     @app.on_message(filters.command("users") & filters.private)
     async def on_users(_c: Client, m: Message):
         if not m.from_user or m.from_user.id not in cfg.admins:
+            uid = m.from_user.id if m.from_user else "unknown"
+            await m.reply_text(
+                f"🚫 You are not an admin.\nYour ID: `{uid}`", quote=True
+            )
             return
         users = await db.all_users_detailed()
         if not users:
@@ -124,6 +128,10 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
     @app.on_message(filters.command("broadcast") & filters.private)
     async def on_broadcast(_c: Client, m: Message):
         if not m.from_user or m.from_user.id not in cfg.admins:
+            uid = m.from_user.id if m.from_user else "unknown"
+            await m.reply_text(
+                f"🚫 You are not an admin.\nYour ID: `{uid}`", quote=True
+            )
             return
         if not m.reply_to_message:
             await m.reply_text(

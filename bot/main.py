@@ -88,7 +88,6 @@ async def run() -> None:
 
     # 2) Log the bot in, retrying on FloodWait without taking the server down.
     await _start_bot_with_retry(bot)
-    app["bot_ready"] = True
 
     # Register the slash-command menu shown when users type "/".
     try:
