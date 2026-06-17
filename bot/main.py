@@ -5,10 +5,18 @@ import signal
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.errors import FloodWait
+from pyrogram.types import BotCommand
 
 from .config import load_config
 from .handlers import register_handlers
 from .server import make_app
+
+
+BOT_COMMANDS = [
+    BotCommand("start", "Check if the bot is alive"),
+    BotCommand("help", "How to use the bot"),
+    BotCommand("about", "Know about the bot"),
+]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,6 +87,12 @@ async def run() -> None:
     # 2) Log the bot in, retrying on FloodWait without taking the server down.
     await _start_bot_with_retry(bot)
     app["bot_ready"] = True
+
+    # Register the slash-command menu shown when users type "/".
+    try:
+        await bot.set_bot_commands(BOT_COMMANDS)
+    except Exception:
+        log.exception("Failed to set bot commands (non-fatal)")
 
     stop_event = asyncio.Event()
 

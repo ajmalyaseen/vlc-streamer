@@ -15,6 +15,7 @@ from .utils import human_size, make_token
 log = logging.getLogger("handlers")
 
 DEVELOPER = "Ajmal Yaseen"
+CHANNEL_LINK = "https://t.me/alaska_in"
 
 
 def start_text(name: str) -> str:
@@ -23,7 +24,7 @@ def start_text(name: str) -> str:
         "I am a **File to VLC Stream Link** bot.\n"
         "Send me any video file (MP4 / MKV) and I'll give you a direct "
         "streaming link you can open in VLC.\n\n"
-        f"✨ Maintained by **{DEVELOPER}**"
+        f"✨ Maintained by [Alaska bots]({CHANNEL_LINK})"
     )
 
 
@@ -77,6 +78,18 @@ def register_handlers(app: Client, cfg: Config) -> None:
             reply_markup=start_markup(),
             disable_web_page_preview=True,
             quote=True,
+        )
+
+    @app.on_message(filters.command("help") & filters.private)
+    async def on_help(_c: Client, m: Message):
+        await m.reply_text(
+            HELP_TEXT, reply_markup=back_markup(), disable_web_page_preview=True, quote=True
+        )
+
+    @app.on_message(filters.command("about") & filters.private)
+    async def on_about(_c: Client, m: Message):
+        await m.reply_text(
+            ABOUT_TEXT, reply_markup=back_markup(), disable_web_page_preview=True, quote=True
         )
 
     @app.on_callback_query()
