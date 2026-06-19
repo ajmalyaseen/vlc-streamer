@@ -1,44 +1,88 @@
 """Byte-range streaming over Pyrogram's stream_media.
 
-Pyrogram yields fixed 1 MiB chunks. We align the requested [start, end] byte
-range to chunk boundaries, then trim the first/last chunks so callers get
-exactly the bytes they asked for.
+Telegram caps file parts at 1 MiB (upload.GetFile), so Pyrogram yields fixed
+1 MiB chunks — larger "chunk sizes" are not possible. Instead we prefetch a
+few chunks ahead via a bounded queue so downloading from Telegram continues
+while the current chunk is written to the client. This is the real lever for
+reducing mid-playback waiting.
+
+The prefetch producer runs as a normal task owned by this plain coroutine
+(not an async generator), so cancelling/awaiting it during cleanup is safe —
+that avoids the "coroutine ignored GeneratorExit" problem of generator-based
+prefetch.
 """
-from typing import AsyncGenerator
+import asyncio
+import logging
 
 from pyrogram import Client
 from pyrogram.types import Message
 
-CHUNK_SIZE = 1024 * 1024  # 1 MiB — Pyrogram's native chunk size
+log = logging.getLogger("streamer")
+
+CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's max part size (fixed)
+PREFETCH = 3              # chunks downloaded ahead (~3 MiB/stream; keep low on 256MB Nano)
+
+_SENTINEL = object()
 
 
-async def stream_range(
+async def stream_to_response(
     client: Client,
     message: Message,
     start: int,
     end: int,
-) -> AsyncGenerator[bytes, None]:
-    """Yield bytes from `start` to `end` (inclusive) of the message's media."""
-    if end < start:
-        return
+    response,
+) -> int:
+    """Stream bytes [start, end] of the media straight to an aiohttp response.
 
-    first_chunk_index = start // CHUNK_SIZE
-    last_chunk_index = end // CHUNK_SIZE
-    n_chunks = last_chunk_index - first_chunk_index + 1
+    Returns the number of bytes written. Lets FileReferenceExpired propagate so
+    the caller can refresh the message and retry (it occurs before any write).
+    """
+    if end < start:
+        return 0
+
+    first_chunk = start // CHUNK_SIZE
+    last_chunk = end // CHUNK_SIZE
+    n_chunks = last_chunk - first_chunk + 1
     last_byte_exclusive = end + 1
 
-    pos = first_chunk_index * CHUNK_SIZE
-    async for chunk in client.stream_media(
-        message,
-        offset=first_chunk_index,
-        limit=n_chunks,
-    ):
-        chunk_start = pos
-        chunk_end = pos + len(chunk)
-        slice_lo = max(0, start - chunk_start)
-        slice_hi = min(len(chunk), last_byte_exclusive - chunk_start)
-        if slice_lo < slice_hi:
-            yield chunk[slice_lo:slice_hi]
-        pos = chunk_end
-        if pos >= last_byte_exclusive:
-            break
+    queue: asyncio.Queue = asyncio.Queue(maxsize=PREFETCH)
+
+    async def producer() -> None:
+        try:
+            async for chunk in client.stream_media(
+                message, offset=first_chunk, limit=n_chunks
+            ):
+                await queue.put(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # surface to the consumer
+            await queue.put(e)
+        finally:
+            await queue.put(_SENTINEL)
+
+    task = asyncio.create_task(producer())
+    pos = first_chunk * CHUNK_SIZE
+    written = 0
+    try:
+        while True:
+            item = await queue.get()
+            if item is _SENTINEL:
+                break
+            if isinstance(item, Exception):
+                raise item
+            chunk = item
+            lo = max(0, start - pos)
+            hi = min(len(chunk), last_byte_exclusive - pos)
+            if lo < hi:
+                await response.write(chunk[lo:hi])
+                written += hi - lo
+            pos += len(chunk)
+            if pos >= last_byte_exclusive:
+                break
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    return written
