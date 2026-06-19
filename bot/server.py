@@ -1,23 +1,20 @@
 import asyncio
 import logging
 import re
-import time
 from html import escape
 from urllib.parse import quote
 
 from aiohttp import web
 from pyrogram import Client
-from pyrogram.errors import FileReferenceExpired
 from pyrogram.types import Message
 
 from .config import Config
-from .streamer import stream_to_response
+from .streamer import stream_range
 from .utils import verify_token
 
 log = logging.getLogger("server")
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
-CACHE_TTL = 1800  # seconds to keep a file's message/metadata + client assignment
 
 
 WATCH_PAGE = """<!doctype html>
@@ -71,11 +68,15 @@ WATCH_PAGE = """<!doctype html>
   document.getElementById("vlc").href = vlcLink;
 
   if (isAndroid) {{
+    // The intent's browser_fallback_url sends users to the Play Store
+    // automatically when VLC isn't installed.
     window.location.href = vlcLink;
   }} else if (isiOS) {{
-    var startedAt = Date.now();
+    // If VLC opens, the page is backgrounded and the timer is cancelled.
+    // Otherwise we assume it's not installed and go to the App Store.
+    var start = Date.now();
     var timer = setTimeout(function() {{
-      if (!document.hidden && Date.now() - startedAt < 2500) {{
+      if (!document.hidden && Date.now() - start < 2500) {{
         window.location.href = APPSTORE;
       }}
     }}, 1500);
@@ -90,65 +91,15 @@ WATCH_PAGE = """<!doctype html>
 </html>"""
 
 
+
+
 def _extract_media(message: Message):
     return message.document or message.video or message.audio or message.animation
 
 
-def _select_client_index(app: web.Application, chat_id: int) -> int:
-    """Pick the least-busy eligible client. Workers can only read LOG_CHANNEL
-    files, so they're only eligible when the file lives in the log channel."""
-    cfg: Config = app["config"]
-    clients = app["clients"]
-    active = app["active"]
-    if len(clients) > 1 and cfg.log_channel and chat_id == cfg.log_channel:
-        # least active streams; ties broken by lowest index
-        return min(range(len(clients)), key=lambda i: active[i])
-    return 0  # only the main bot can read non-log-channel files
-
-
-async def _get_entry(app: web.Application, ci: int, chat_id: int, msg_id: int):
-    """Cached {message, size, mime, name} for a specific client (ci).
-
-    Cached per client because Telegram file references are per-client: a message
-    fetched by one bot can't be streamed by another. Distributing requests across
-    bots therefore needs each bot to hold its own reference. The message + its warm
-    media session are reused across that bot's many Range requests for the file."""
-    cache = app["meta_cache"]
-    key = (ci, chat_id, msg_id)
-    now = time.monotonic()
-    entry = cache.get(key)
-    if entry and entry["expiry"] > now:
-        return entry
-
-    client = app["clients"][ci]
-    message = await client.get_messages(chat_id, msg_id)
-    media = _extract_media(message)
-    if not media:
-        return None
-    entry = {
-        "message": message,
-        "size": media.file_size,
-        "mime": media.mime_type or "application/octet-stream",
-        "name": getattr(media, "file_name", None) or f"file_{msg_id}",
-        "expiry": now + CACHE_TTL,
-    }
-    cache[key] = entry
-    return entry
-
-
-async def _refresh_entry(app: web.Application, ci: int, chat_id: int, msg_id: int):
-    """Re-fetch a fresh message (new file reference) for client ci."""
-    client = app["clients"][ci]
-    message = await client.get_messages(chat_id, msg_id)
-    entry = app["meta_cache"].get((ci, chat_id, msg_id))
-    if entry:
-        entry["message"] = message
-        entry["expiry"] = time.monotonic() + CACHE_TTL
-    return message
-
-
 async def stream_handler(request: web.Request) -> web.StreamResponse:
     cfg: Config = request.app["config"]
+    bot: Client = request.app["bot"]
 
     try:
         chat_id = int(request.match_info["chat_id"])
@@ -160,86 +111,75 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
         return web.Response(status=403, text="Invalid or missing token")
 
-    # Distribute each request to the least-busy eligible client so VLC's many
-    # parallel connections for one file spread across bots instead of piling
-    # onto a single one. Increment the counter NOW (at selection) so concurrent
-    # requests see updated load and don't all pick the same client.
-    ci = _select_client_index(request.app, chat_id)
-    active = request.app["active"]
-    active[ci] += 1
     try:
-        try:
-            entry = await _get_entry(request.app, ci, chat_id, msg_id)
-        except Exception as e:
-            log.warning("get_messages failed for %s/%s: %s", chat_id, msg_id, e)
-            return web.Response(status=404, text="File not found")
-        if entry is None:
-            return web.Response(status=404, text="File not found")
+        message = await bot.get_messages(chat_id, msg_id)
+    except Exception as e:
+        log.warning("get_messages failed for %s/%s: %s", chat_id, msg_id, e)
+        return web.Response(status=404, text="File not found")
 
-        file_size = entry["size"]
-        mime = entry["mime"]
-        file_name = entry["name"]
-        client = request.app["clients"][ci]
-        message = entry["message"]
+    media = _extract_media(message)
+    if not media:
+        return web.Response(status=404, text="No streamable media on this message")
 
-        # ---- Range handling ----
-        start, end, status = 0, file_size - 1, 200
-        range_header = request.headers.get("Range")
-        if range_header:
-            m = RANGE_RE.match(range_header)
-            if m:
-                s, e = m.group(1), m.group(2)
-                if s == "" and e == "":
-                    return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
-                if s == "":  # suffix: last N bytes
-                    start = max(0, file_size - int(e))
-                    end = file_size - 1
-                else:
-                    start = int(s)
-                    end = int(e) if e else file_size - 1
-                if start >= file_size or end >= file_size or start > end:
-                    return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
-                status = 206
+    file_size: int = media.file_size
+    mime: str = media.mime_type or "application/octet-stream"
+    file_name: str = getattr(media, "file_name", None) or f"file_{msg_id}"
 
-        length = end - start + 1
-        headers = {
-            "Content-Type": mime,
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(length),
-            "Content-Disposition": f'inline; filename="{file_name}"',
-        }
-        if status == 206:
-            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+    # Default: full content
+    start = 0
+    end = file_size - 1
+    status = 200
 
-        response = web.StreamResponse(status=status, headers=headers)
-        await response.prepare(request)
+    range_header = request.headers.get("Range")
+    if range_header:
+        m = RANGE_RE.match(range_header)
+        if m:
+            s, e = m.group(1), m.group(2)
+            if s == "" and e == "":
+                return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+            if s == "":
+                # suffix range: last N bytes
+                suffix = int(e)
+                start = max(0, file_size - suffix)
+                end = file_size - 1
+            else:
+                start = int(s)
+                end = int(e) if e else file_size - 1
+            if start >= file_size or end >= file_size or start > end:
+                return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+            status = 206
 
-        if request.method == "HEAD":
-            await response.write_eof()
-            return response
+    length = end - start + 1
+    headers = {
+        "Content-Type": mime,
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+        "Content-Disposition": f'inline; filename="{file_name}"',
+    }
+    if status == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
 
-        cname = getattr(client, "name", f"client{ci}")
-        log.info("stream start msg=%s client=%s range=%s-%s active=%s",
-                 msg_id, cname, start, end, active)
-        try:
-            try:
-                await stream_to_response(client, message, start, end, response)
-            except FileReferenceExpired:
-                # Reference expired (before any bytes sent): refresh + retry once.
-                message = await _refresh_entry(request.app, ci, chat_id, msg_id)
-                await stream_to_response(client, message, start, end, response)
-        except (ConnectionError, asyncio.CancelledError):
-            pass  # client disconnected mid-stream (normal during seeking)
-        except Exception as e:
-            log.exception("Streaming error for msg %s: %s", msg_id, e)
-        finally:
-            try:
-                await response.write_eof()
-            except Exception:
-                pass
+    response = web.StreamResponse(status=status, headers=headers)
+    await response.prepare(request)
+
+    if request.method == "HEAD":
+        await response.write_eof()
         return response
+
+    try:
+        async for chunk in stream_range(bot, message, start, end):
+            await response.write(chunk)
+    except (ConnectionResetError, asyncio.CancelledError):
+        log.info("Client disconnected during stream of msg %s", msg_id)
+    except Exception as e:
+        log.exception("Streaming error for msg %s: %s", msg_id, e)
     finally:
-        active[ci] -= 1
+        try:
+            await response.write_eof()
+        except Exception:
+            pass
+
+    return response
 
 
 async def watch_handler(request: web.Request) -> web.Response:
@@ -270,17 +210,14 @@ async def healthz(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
-    clients = clients or [bot]
+def make_app(bot: Client, cfg: Config) -> web.Application:
     app = web.Application(client_max_size=1024 * 16)
     app["bot"] = bot
     app["config"] = cfg
-    app["clients"] = clients
-    app["active"] = [0] * len(clients)        # active streams per client (load monitor)
-    app["meta_cache"] = {}                      # (chat,msg) -> entry with TTL
     app.router.add_get("/", index)
     app.router.add_get("/healthz", healthz)
-    # add_get also registers HEAD automatically; the handler checks request.method.
+    # add_get also registers HEAD automatically (allow_head=True by default),
+    # and our handler checks request.method == "HEAD".
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     app.router.add_get("/watch/{chat_id}/{msg_id}/{name}", watch_handler)
     return app

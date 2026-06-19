@@ -7,22 +7,6 @@ from pyrogram import Client
 from pyrogram.errors import FloodWait
 from pyrogram.types import BotCommand
 
-# uvloop is a faster asyncio event loop (Linux/macOS). Optional: ignored on
-# platforms where it isn't installed (e.g. Windows dev machines).
-try:
-    import uvloop
-
-    uvloop.install()
-except Exception:
-    pass
-
-# Telegram now issues channel IDs larger than Pyrogram 2.0.106's built-in
-# valid range, which makes it reject them with "Peer id invalid". Widen the
-# lower bound so modern -100... channel IDs resolve correctly.
-import pyrogram.utils as _pyro_utils
-
-_pyro_utils.MIN_CHANNEL_ID = -100_999_999_999_999
-
 from .config import load_config
 from .db import make_user_db
 from .handlers import register_handlers
@@ -93,27 +77,9 @@ async def run() -> None:
     db = make_user_db(cfg.database_url)
     register_handlers(bot, cfg, db)
 
-    # Optional extra bot clients used to parallelize streaming across many
-    # users. They can only read files in a shared LOG_CHANNEL, so they require
-    # LOG_CHANNEL to be set and every worker bot added to that channel.
-    workers = []
-    for idx, token in enumerate(cfg.worker_tokens, start=1):
-        workers.append(
-            Client(
-                name=f"vlc_worker_{idx}",
-                api_id=cfg.api_id,
-                api_hash=cfg.api_hash,
-                bot_token=token,
-                in_memory=True,
-                sleep_threshold=60,
-                max_concurrent_transmissions=cfg.workers,
-            )
-        )
-
     # 1) Start the HTTP server FIRST so Koyeb health checks pass immediately,
     #    even if the bot login is briefly delayed by a FloodWait.
-    clients = [bot] + workers
-    app = make_app(bot, cfg, clients)
+    app = make_app(bot, cfg)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, cfg.bind_host, cfg.port)
@@ -122,15 +88,6 @@ async def run() -> None:
 
     # 2) Log the bot in, retrying on FloodWait without taking the server down.
     await _start_bot_with_retry(bot)
-
-    # Start worker clients (best-effort; a failed worker just isn't used).
-    for w in workers:
-        try:
-            await _start_bot_with_retry(w)
-        except Exception:
-            log.exception("A worker client failed to start; continuing")
-    if workers:
-        log.info("Started %d worker client(s) for parallel streaming", len(workers))
 
     # Register the slash-command menu shown when users type "/".
     try:
@@ -157,11 +114,10 @@ async def run() -> None:
     finally:
         log.info("Stopping HTTP server and bot")
         await runner.cleanup()
-        for client in clients:
-            try:
-                await client.stop()
-            except Exception:
-                pass
+        try:
+            await bot.stop()
+        except Exception:
+            pass
 
 
 def main() -> None:
