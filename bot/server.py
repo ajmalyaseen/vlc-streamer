@@ -97,17 +97,16 @@ def _extract_media(message: Message):
     return message.document or message.video or message.audio or message.animation
 
 
-def _pick_client(request: web.Request, chat_id: int):
-    """Round-robin a streaming client. Workers can only read LOG_CHANNEL files,
-    so only spread across the pool when the file lives in the log channel."""
+def _pick_client(request: web.Request, chat_id: int, msg_id: int):
+    """Pick a streaming client. Workers can only read LOG_CHANNEL files, so only
+    use the pool for log-channel files. Pin each file to one client (by msg_id)
+    so repeated Range/seek requests reuse that client's warm media session
+    instead of rebuilding a fresh DC connection every time."""
     cfg: Config = request.app["config"]
     bot: Client = request.app["bot"]
     clients = request.app.get("clients") or [bot]
     if len(clients) > 1 and cfg.log_channel and chat_id == cfg.log_channel:
-        cycle = request.app["client_index"]
-        client = clients[cycle[0] % len(clients)]
-        cycle[0] += 1
-        return client
+        return clients[msg_id % len(clients)]
     return bot
 
 
@@ -124,7 +123,7 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
         return web.Response(status=403, text="Invalid or missing token")
 
-    client = _pick_client(request, chat_id)
+    client = _pick_client(request, chat_id, msg_id)
 
     # Always fetch the message fresh with the SAME client that will stream it.
     # File references are per-client and expire, so caching them (or sharing
@@ -149,7 +148,6 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     status = 200
 
     range_header = request.headers.get("Range")
-    log.info("stream msg=%s Range=%r size=%s", msg_id, range_header, file_size)
     if range_header:
         m = RANGE_RE.match(range_header)
         if m:
