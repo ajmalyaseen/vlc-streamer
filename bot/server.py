@@ -97,9 +97,38 @@ def _extract_media(message: Message):
     return message.document or message.video or message.audio or message.animation
 
 
-async def stream_handler(request: web.Request) -> web.StreamResponse:
+def _pick_client(request: web.Request, chat_id: int):
+    """Round-robin a streaming client. Workers can only read LOG_CHANNEL files,
+    so only spread across the pool when the file lives in the log channel."""
     cfg: Config = request.app["config"]
     bot: Client = request.app["bot"]
+    clients = request.app.get("clients") or [bot]
+    if len(clients) > 1 and cfg.log_channel and chat_id == cfg.log_channel:
+        cycle = request.app["client_index"]
+        client = clients[cycle[0] % len(clients)]
+        cycle[0] += 1
+        return client
+    return bot
+
+
+async def _get_message_cached(request: web.Request, client: Client, chat_id: int, msg_id: int):
+    """Cache message objects briefly so VLC's many Range requests during seeking
+    don't each trigger a get_messages round-trip to Telegram."""
+    import time
+
+    cache = request.app["msg_cache"]
+    key = (chat_id, msg_id)
+    now = time.monotonic()
+    cached = cache.get(key)
+    if cached and now - cached[1] < 300:  # 5 min TTL
+        return cached[0]
+    message = await client.get_messages(chat_id, msg_id)
+    cache[key] = (message, now)
+    return message
+
+
+async def stream_handler(request: web.Request) -> web.StreamResponse:
+    cfg: Config = request.app["config"]
 
     try:
         chat_id = int(request.match_info["chat_id"])
@@ -111,8 +140,10 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
         return web.Response(status=403, text="Invalid or missing token")
 
+    client = _pick_client(request, chat_id)
+
     try:
-        message = await bot.get_messages(chat_id, msg_id)
+        message = await _get_message_cached(request, client, chat_id, msg_id)
     except Exception as e:
         log.warning("get_messages failed for %s/%s: %s", chat_id, msg_id, e)
         return web.Response(status=404, text="File not found")
@@ -167,7 +198,7 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         return response
 
     try:
-        async for chunk in stream_range(bot, message, start, end):
+        async for chunk in stream_range(client, message, start, end):
             await response.write(chunk)
     except (ConnectionResetError, asyncio.CancelledError):
         log.info("Client disconnected during stream of msg %s", msg_id)
@@ -210,10 +241,13 @@ async def healthz(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-def make_app(bot: Client, cfg: Config) -> web.Application:
+def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
     app = web.Application(client_max_size=1024 * 16)
     app["bot"] = bot
     app["config"] = cfg
+    app["clients"] = clients or [bot]
+    app["client_index"] = [0]   # mutable round-robin counter
+    app["msg_cache"] = {}        # (chat_id, msg_id) -> (message, monotonic_ts)
     app.router.add_get("/", index)
     app.router.add_get("/healthz", healthz)
     # add_get also registers HEAD automatically (allow_head=True by default),
