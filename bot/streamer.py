@@ -20,7 +20,7 @@ from pyrogram.types import Message
 log = logging.getLogger("streamer")
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's max part size (fixed)
-PREFETCH = 3              # chunks downloaded ahead (~3 MiB/stream; keep low on 256MB Nano)
+PREFETCH = 5              # chunks downloaded ahead (~5 MiB/stream); load now spread over 5 bots
 
 _SENTINEL = object()
 
