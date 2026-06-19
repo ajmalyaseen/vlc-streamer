@@ -111,22 +111,6 @@ def _pick_client(request: web.Request, chat_id: int):
     return bot
 
 
-async def _get_message_cached(request: web.Request, client: Client, chat_id: int, msg_id: int):
-    """Cache message objects briefly so VLC's many Range requests during seeking
-    don't each trigger a get_messages round-trip to Telegram."""
-    import time
-
-    cache = request.app["msg_cache"]
-    key = (chat_id, msg_id)
-    now = time.monotonic()
-    cached = cache.get(key)
-    if cached and now - cached[1] < 300:  # 5 min TTL
-        return cached[0]
-    message = await client.get_messages(chat_id, msg_id)
-    cache[key] = (message, now)
-    return message
-
-
 async def stream_handler(request: web.Request) -> web.StreamResponse:
     cfg: Config = request.app["config"]
 
@@ -142,8 +126,11 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
 
     client = _pick_client(request, chat_id)
 
+    # Always fetch the message fresh with the SAME client that will stream it.
+    # File references are per-client and expire, so caching them (or sharing
+    # across clients) causes FILE_REFERENCE_EXPIRED.
     try:
-        message = await _get_message_cached(request, client, chat_id, msg_id)
+        message = await client.get_messages(chat_id, msg_id)
     except Exception as e:
         log.warning("get_messages failed for %s/%s: %s", chat_id, msg_id, e)
         return web.Response(status=404, text="File not found")
@@ -247,7 +234,6 @@ def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
     app["config"] = cfg
     app["clients"] = clients or [bot]
     app["client_index"] = [0]   # mutable round-robin counter
-    app["msg_cache"] = {}        # (chat_id, msg_id) -> (message, monotonic_ts)
     app.router.add_get("/", index)
     app.router.add_get("/healthz", healthz)
     # add_get also registers HEAD automatically (allow_head=True by default),
