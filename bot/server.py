@@ -149,6 +149,7 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     status = 200
 
     range_header = request.headers.get("Range")
+    log.info("stream msg=%s Range=%r size=%s", msg_id, range_header, file_size)
     if range_header:
         m = RANGE_RE.match(range_header)
         if m:
@@ -241,3 +242,4 @@ def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     app.router.add_get("/watch/{chat_id}/{msg_id}/{name}", watch_handler)
     return app
+
