@@ -1,20 +1,23 @@
 import asyncio
 import logging
 import re
+import time
 from html import escape
 from urllib.parse import quote
 
 from aiohttp import web
 from pyrogram import Client
+from pyrogram.errors import FileReferenceExpired
 from pyrogram.types import Message
 
 from .config import Config
-from .streamer import stream_range
+from .streamer import stream_to_response
 from .utils import verify_token
 
 log = logging.getLogger("server")
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+CACHE_TTL = 1800  # seconds to keep a file's message/metadata + client assignment
 
 
 WATCH_PAGE = """<!doctype html>
@@ -68,15 +71,11 @@ WATCH_PAGE = """<!doctype html>
   document.getElementById("vlc").href = vlcLink;
 
   if (isAndroid) {{
-    // The intent's browser_fallback_url sends users to the Play Store
-    // automatically when VLC isn't installed.
     window.location.href = vlcLink;
   }} else if (isiOS) {{
-    // If VLC opens, the page is backgrounded and the timer is cancelled.
-    // Otherwise we assume it's not installed and go to the App Store.
-    var start = Date.now();
+    var startedAt = Date.now();
     var timer = setTimeout(function() {{
-      if (!document.hidden && Date.now() - start < 2500) {{
+      if (!document.hidden && Date.now() - startedAt < 2500) {{
         window.location.href = APPSTORE;
       }}
     }}, 1500);
@@ -91,23 +90,60 @@ WATCH_PAGE = """<!doctype html>
 </html>"""
 
 
-
-
 def _extract_media(message: Message):
     return message.document or message.video or message.audio or message.animation
 
 
-def _pick_client(request: web.Request, chat_id: int, msg_id: int):
-    """Pick a streaming client. Workers can only read LOG_CHANNEL files, so only
-    use the pool for log-channel files. Pin each file to one client (by msg_id)
-    so repeated Range/seek requests reuse that client's warm media session
-    instead of rebuilding a fresh DC connection every time."""
-    cfg: Config = request.app["config"]
-    bot: Client = request.app["bot"]
-    clients = request.app.get("clients") or [bot]
+def _select_client_index(app: web.Application, chat_id: int) -> int:
+    """Pick the least-busy eligible client. Workers can only read LOG_CHANNEL
+    files, so they're only eligible when the file lives in the log channel."""
+    cfg: Config = app["config"]
+    clients = app["clients"]
+    active = app["active"]
     if len(clients) > 1 and cfg.log_channel and chat_id == cfg.log_channel:
-        return clients[msg_id % len(clients)]
-    return bot
+        # least active streams; ties broken by lowest index
+        return min(range(len(clients)), key=lambda i: active[i])
+    return 0  # only the main bot can read non-log-channel files
+
+
+async def _get_entry(app: web.Application, chat_id: int, msg_id: int):
+    """Return a cached {message, size, mime, name, ci} entry, fetching fresh on
+    miss/expiry. The file is pinned to one client (ci) so its file reference and
+    warm media session stay valid across the many Range requests of a seek."""
+    cache = app["meta_cache"]
+    key = (chat_id, msg_id)
+    now = time.monotonic()
+    entry = cache.get(key)
+    if entry and entry["expiry"] > now:
+        return entry
+
+    ci = _select_client_index(app, chat_id)
+    client = app["clients"][ci]
+    message = await client.get_messages(chat_id, msg_id)
+    media = _extract_media(message)
+    if not media:
+        return None
+    entry = {
+        "message": message,
+        "size": media.file_size,
+        "mime": media.mime_type or "application/octet-stream",
+        "name": getattr(media, "file_name", None) or f"file_{msg_id}",
+        "ci": ci,
+        "expiry": now + CACHE_TTL,
+    }
+    cache[key] = entry
+    return entry
+
+
+async def _refresh_entry(app: web.Application, chat_id: int, msg_id: int, ci: int):
+    """Re-fetch a fresh message (new file reference) using the pinned client."""
+    client = app["clients"][ci]
+    message = await client.get_messages(chat_id, msg_id)
+    entry = app["meta_cache"].get((chat_id, msg_id))
+    if entry:
+        entry["message"] = message
+        entry["expiry"] = time.monotonic() + CACHE_TTL
+    return message
 
 
 async def stream_handler(request: web.Request) -> web.StreamResponse:
@@ -123,30 +159,23 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
         return web.Response(status=403, text="Invalid or missing token")
 
-    client = _pick_client(request, chat_id, msg_id)
-
-    # Always fetch the message fresh with the SAME client that will stream it.
-    # File references are per-client and expire, so caching them (or sharing
-    # across clients) causes FILE_REFERENCE_EXPIRED.
     try:
-        message = await client.get_messages(chat_id, msg_id)
+        entry = await _get_entry(request.app, chat_id, msg_id)
     except Exception as e:
         log.warning("get_messages failed for %s/%s: %s", chat_id, msg_id, e)
         return web.Response(status=404, text="File not found")
+    if entry is None:
+        return web.Response(status=404, text="File not found")
 
-    media = _extract_media(message)
-    if not media:
-        return web.Response(status=404, text="No streamable media on this message")
+    file_size = entry["size"]
+    mime = entry["mime"]
+    file_name = entry["name"]
+    ci = entry["ci"]
+    client = request.app["clients"][ci]
+    message = entry["message"]
 
-    file_size: int = media.file_size
-    mime: str = media.mime_type or "application/octet-stream"
-    file_name: str = getattr(media, "file_name", None) or f"file_{msg_id}"
-
-    # Default: full content
-    start = 0
-    end = file_size - 1
-    status = 200
-
+    # ---- Range handling ----
+    start, end, status = 0, file_size - 1, 200
     range_header = request.headers.get("Range")
     if range_header:
         m = RANGE_RE.match(range_header)
@@ -154,10 +183,8 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
             s, e = m.group(1), m.group(2)
             if s == "" and e == "":
                 return web.Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
-            if s == "":
-                # suffix range: last N bytes
-                suffix = int(e)
-                start = max(0, file_size - suffix)
+            if s == "":  # suffix: last N bytes
+                start = max(0, file_size - int(e))
                 end = file_size - 1
             else:
                 start = int(s)
@@ -183,14 +210,24 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         await response.write_eof()
         return response
 
+    active = request.app["active"]
+    active[ci] += 1
+    cname = getattr(client, "name", f"client{ci}")
+    log.info("stream start msg=%s client=%s range=%s-%s active=%s",
+             msg_id, cname, start, end, active)
     try:
-        async for chunk in stream_range(client, message, start, end):
-            await response.write(chunk)
+        try:
+            await stream_to_response(client, message, start, end, response)
+        except FileReferenceExpired:
+            # Reference expired (occurs before any bytes are sent): refresh + retry once.
+            message = await _refresh_entry(request.app, chat_id, msg_id, ci)
+            await stream_to_response(client, message, start, end, response)
     except (ConnectionError, asyncio.CancelledError):
-        log.info("Client disconnected during stream of msg %s", msg_id)
+        pass  # client disconnected mid-stream (normal during seeking)
     except Exception as e:
         log.exception("Streaming error for msg %s: %s", msg_id, e)
     finally:
+        active[ci] -= 1
         try:
             await response.write_eof()
         except Exception:
@@ -228,16 +265,16 @@ async def healthz(_request: web.Request) -> web.Response:
 
 
 def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
+    clients = clients or [bot]
     app = web.Application(client_max_size=1024 * 16)
     app["bot"] = bot
     app["config"] = cfg
-    app["clients"] = clients or [bot]
-    app["client_index"] = [0]   # mutable round-robin counter
+    app["clients"] = clients
+    app["active"] = [0] * len(clients)        # active streams per client (load monitor)
+    app["meta_cache"] = {}                      # (chat,msg) -> entry with TTL
     app.router.add_get("/", index)
     app.router.add_get("/healthz", healthz)
-    # add_get also registers HEAD automatically (allow_head=True by default),
-    # and our handler checks request.method == "HEAD".
+    # add_get also registers HEAD automatically; the handler checks request.method.
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     app.router.add_get("/watch/{chat_id}/{msg_id}/{name}", watch_handler)
     return app
-
