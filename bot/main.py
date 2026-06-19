@@ -16,6 +16,13 @@ try:
 except Exception:
     pass
 
+# Telegram now issues channel IDs larger than Pyrogram 2.0.106's built-in
+# valid range, which makes it reject them with "Peer id invalid". Widen the
+# lower bound so modern -100... channel IDs resolve correctly.
+import pyrogram.utils as _pyro_utils
+
+_pyro_utils.MIN_CHANNEL_ID = -100_999_999_999_999
+
 from .config import load_config
 from .db import make_user_db
 from .handlers import register_handlers

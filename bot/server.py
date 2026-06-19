@@ -200,7 +200,7 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     try:
         async for chunk in stream_range(client, message, start, end):
             await response.write(chunk)
-    except (ConnectionResetError, asyncio.CancelledError):
+    except (ConnectionError, asyncio.CancelledError):
         log.info("Client disconnected during stream of msg %s", msg_id)
     except Exception as e:
         log.exception("Streaming error for msg %s: %s", msg_id, e)
