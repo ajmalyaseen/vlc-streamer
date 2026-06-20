@@ -247,7 +247,7 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
 
     @app.on_message(filters.command("help") & filters.private)
     async def on_help(_c: Client, m: Message):
-        await m.reply_text(HELP_TEXT, reply_markup=back_home_markup(),
+        await m.reply_text(HELP_TEXT, reply_markup=about_markup(),
                            disable_web_page_preview=True, quote=True)
 
     @app.on_message(filters.command("about") & filters.private)
@@ -481,7 +481,7 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
             state = await subs.get_state(cq.from_user)
             await cq.message.edit_text(myplan_text(state), reply_markup=back_home_markup())
         elif data == "help":
-            await cq.message.edit_text(HELP_TEXT, reply_markup=back_home_markup(),
+            await cq.message.edit_text(HELP_TEXT, reply_markup=about_markup(),
                                        disable_web_page_preview=True)
         elif data == "about":
             await cq.message.edit_text(ABOUT_TEXT, reply_markup=about_markup(),
