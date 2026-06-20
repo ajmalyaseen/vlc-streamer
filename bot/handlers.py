@@ -23,6 +23,8 @@ DEVELOPER = "Ajmal Yaseen"
 CHANNEL_LINK = "https://t.me/alaska_in"
 VERSION = "v2.0.0"
 
+PLAN_RANK = {"free": 0, "plus": 1, "pro": 2}
+
 HELP_TEXT = (
     "💡 **How to use**\n\n"
     "1. Send me a video file (MP4 / MKV / etc.).\n"
@@ -60,7 +62,7 @@ def welcome_markup() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("💡 Help", callback_data="help"),
                 InlineKeyboardButton("📂 About", callback_data="about"),
             ],
-            [InlineKeyboardButton("⚙️ Manage", callback_data="menu_manage")],
+            [InlineKeyboardButton("⚙️ Manage Plans", callback_data="menu_manage")],
             [InlineKeyboardButton("🔐 Close", callback_data="close")],
         ]
     )
@@ -371,6 +373,22 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
 
     async def _start_payment(cq: CallbackQuery, plan_key: str):
         plan = plans[plan_key]
+        # Safety guard: block if user already has this plan or a higher one
+        # (e.g. an old button left in chat history).
+        state = await subs.get_state(cq.from_user)
+        if PLAN_RANK.get(state.plan.key, 0) >= PLAN_RANK.get(plan_key, 0):
+            msg = (
+                "🚀 You're already on our highest plan (Pro)."
+                if state.plan.key == "pro"
+                else f"✅ You're already on the {plan.name} plan."
+            )
+            await cq.message.reply_text(
+                msg + "\n\nIf you're facing any issue, contact support.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)]]
+                ),
+            )
+            return
         if not payments.enabled:
             await cq.message.reply_text("Payments are not enabled yet. Please contact support.")
             return
@@ -387,12 +405,16 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
 
         if res.provider == "razorpay":
             markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(f"💳 Pay ₹{res.amount}", url=res.pay_url)]]
+                [
+                    [InlineKeyboardButton(f"💳 Pay ₹{res.amount}", url=res.pay_url)],
+                    [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
+                ]
             )
             await cq.message.reply_text(
                 f"💳 **{plan.name} Plan — ₹{res.amount}**\n\n"
                 "Tap **Pay** to checkout securely (UPI / Card / Wallet / Netbanking).\n"
-                "Your plan activates **automatically** the moment payment succeeds. ✅",
+                "Your plan activates **automatically** the moment payment succeeds. ✅\n\n"
+                "📝 Note: if you face any issue, contact support.",
                 reply_markup=markup, disable_web_page_preview=True,
             )
             return
@@ -402,14 +424,18 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
             f"{cfg.base_url}/pay?pa={quote(cfg.upi_id)}&pn=Alaska%20Stream"
             f"&am={res.amount}&tn={quote(res.reference)}"
         )
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton("💳 Open UPI App", url=pay_page)]])
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Open UPI App", url=pay_page)],
+            [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
+        ])
         await cq.message.reply_text(
             f"💳 **Pay ₹{res.amount} for {plan.name}**\n\n"
             f"Reference: `{res.reference}`\n"
             f"UPI ID: `{cfg.upi_id}`\n\n"
             "Tap **Open UPI App** to pay with the amount pre-filled, "
             "or pay manually to the UPI ID above.\n\n"
-            "After paying, send the **last 4 digits of your UTR** here to submit for verification.",
+            "After paying, send the **last 4 digits of your UTR** here to submit for verification.\n\n"
+            "📝 Note: if you face any issue, contact support.",
             reply_markup=markup, disable_web_page_preview=True,
         )
 
@@ -442,12 +468,45 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
                                        disable_web_page_preview=True)
         elif data in ("buy_plus", "buy_pro"):
             plan_key = "plus" if data == "buy_plus" else "pro"
+            state = await subs.get_state(cq.from_user)
+            current = state.plan.key
+            # Already on the highest plan: nothing to buy.
+            if current == "pro":
+                await cq.message.edit_text(
+                    "🚀 **You're already on our highest plan (Pro).**\n\n"
+                    "There's nothing higher to upgrade to.\n"
+                    "If you're facing any issue, contact support.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
+                        [InlineKeyboardButton("🔙 Back", callback_data="menu_plans")],
+                    ]),
+                )
+                return
+            # Already on the plan they're trying to buy again.
+            if current == plan_key:
+                await cq.message.edit_text(
+                    f"✅ **You're already on the {plans[plan_key].name} plan.**\n\n"
+                    "You can upgrade to Pro for higher limits, or contact support "
+                    "if you're facing any issue.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🚀 Upgrade to Pro", callback_data="buy_pro")],
+                        [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
+                        [InlineKeyboardButton("🔙 Back", callback_data="menu_plans")],
+                    ]),
+                )
+                return
+            # Allowed: free→plus, free→pro, plus→pro.
             plan = plans[plan_key]
             markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 Pay Now", callback_data=f"pay_{plan_key}")],
+                [InlineKeyboardButton(f"💳 Pay ₹{plan.price}", callback_data=f"pay_{plan_key}")],
+                [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
                 [InlineKeyboardButton("🔙 Back", callback_data="menu_plans")],
             ])
-            await cq.message.edit_text(plansmod.purchase_text(plan), reply_markup=markup)
+            text = (
+                plansmod.purchase_text(plan)
+                + "\n\n📝 Note: if you face any issue, contact support."
+            )
+            await cq.message.edit_text(text, reply_markup=markup)
         elif data in ("pay_plus", "pay_pro"):
             await cq.answer()
             await _start_payment(cq, "plus" if data == "pay_plus" else "pro")

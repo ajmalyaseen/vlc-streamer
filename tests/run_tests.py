@@ -35,6 +35,7 @@ from bot.utils import make_token, verify_token, make_payment_reference, build_up
 class Cfg:
     upi_id: str = "alaska@upi"
     admin_group_id: int = 0
+    support_link: str = "https://t.me/alaska_in"
     admins: tuple = (999,)
     hash_secret: str = "test-secret"
     base_url: str = "https://test.example"
