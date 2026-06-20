@@ -61,6 +61,7 @@ class PaymentService:
                 "_id": reference,
                 "user_id": user.id,
                 "username": getattr(user, "username", None),
+                "first_name": getattr(user, "first_name", None),
                 "plan": plan_key,
                 "amount": plan.price,
                 "provider": "razorpay",
@@ -84,6 +85,7 @@ class PaymentService:
             "_id": reference,
             "user_id": user.id,
             "username": getattr(user, "username", None),
+            "first_name": getattr(user, "first_name", None),
             "plan": plan_key,
             "amount": plan.price,
             "provider": "upi",
@@ -208,7 +210,28 @@ class PaymentService:
             )
         except Exception:
             log.exception("notify razorpay success failed")
+        await self.announce_member(payment, expires)
         return True
+
+    async def announce_member(self, payment, expires) -> None:
+        """Post a 'new premium member' note to the payment group / admins."""
+        plan = self.plans.get(payment["plan"])
+        uname = f"@{payment['username']}" if payment.get("username") else "—"
+        text = (
+            f"🎉 **New {plan.name} Member!**\n\n"
+            f"👤 Name: {payment.get('first_name') or '—'}\n"
+            f"🔗 Username: {uname}\n"
+            f"🆔 User ID: `{payment['user_id']}`\n"
+            f"💎 Plan: {plan.name}\n"
+            f"💰 Amount: ₹{payment.get('amount', plan.price)}\n"
+            f"📅 Valid Until: {expires.strftime('%d %b %Y')}"
+        )
+        targets = [self.cfg.admin_group_id] if self.cfg.admin_group_id else list(self.cfg.admins)
+        for tid in targets:
+            try:
+                await self.bot.send_message(tid, text)
+            except Exception:
+                log.exception("Failed to announce new member to %s", tid)
 
     # ---------------- manual UPI verification flow ----------------
 
@@ -256,6 +279,7 @@ class PaymentService:
         })
         payment["status"] = "approved"
         payment["expires"] = expires
+        await self.announce_member(payment, expires)
         return payment
 
     async def reject(self, reference: str, admin_id=None):

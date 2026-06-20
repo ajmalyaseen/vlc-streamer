@@ -93,6 +93,15 @@ def back_home_markup() -> InlineKeyboardMarkup:
     )
 
 
+def about_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💎 Premium Plans", callback_data="menu_plans")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_home")],
+        ]
+    )
+
+
 def _expiry_str(expires_at) -> str:
     if not expires_at:
         return "—"
@@ -157,7 +166,15 @@ async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> b
 
     if cfg.log_channel:
         try:
-            stored = await file_message.copy(cfg.log_channel)
+            u = getattr(file_message, "from_user", None)
+            uname = f"@{u.username}" if (u and u.username) else "—"
+            ucap = (
+                "📥 **New file streamed**\n"
+                f"👤 Name: {u.first_name if u else '—'}\n"
+                f"🔗 Username: {uname}\n"
+                f"🆔 User ID: `{u.id if u else '—'}`"
+            )
+            stored = await file_message.copy(cfg.log_channel, caption=ucap)
         except Exception as e:
             log.exception("copy to log channel failed: %s", e)
             await reply_to.reply_text(
@@ -235,7 +252,7 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
 
     @app.on_message(filters.command("about") & filters.private)
     async def on_about(_c: Client, m: Message):
-        await m.reply_text(ABOUT_TEXT, reply_markup=back_home_markup(),
+        await m.reply_text(ABOUT_TEXT, reply_markup=about_markup(),
                            disable_web_page_preview=True, quote=True)
 
     @app.on_message(filters.command("id"))
@@ -465,6 +482,9 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
             await cq.message.edit_text(myplan_text(state), reply_markup=back_home_markup())
         elif data == "help":
             await cq.message.edit_text(HELP_TEXT, reply_markup=back_home_markup(),
+                                       disable_web_page_preview=True)
+        elif data == "about":
+            await cq.message.edit_text(ABOUT_TEXT, reply_markup=about_markup(),
                                        disable_web_page_preview=True)
         elif data in ("buy_plus", "buy_pro"):
             plan_key = "plus" if data == "buy_plus" else "pro"
