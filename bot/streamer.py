@@ -8,6 +8,7 @@ the warm session and skip the handshake.
 
 Based on the well-known TG-FileStreamBot ByteStreamer pattern.
 """
+import asyncio
 import logging
 import math
 
@@ -85,6 +86,8 @@ def get_location(file_id: FileId):
 async def stream_to_response(client: Client, file_id: FileId, start: int, end: int, response) -> int:
     """Stream bytes [start, end] to an aiohttp response using a warm media session.
 
+    Pipelined: the next chunk is fetched from Telegram while the current chunk is
+    being written to the client, so the socket isn't idle waiting on Telegram.
     Lets FileReferenceExpired propagate so the caller can refresh + retry.
     """
     if end < start:
@@ -98,16 +101,28 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
     last_part_cut = (end % CHUNK_SIZE) + 1
     part_count = math.ceil((end + 1) / CHUNK_SIZE) - math.floor(offset / CHUNK_SIZE)
 
+    def _fetch(off: int):
+        return asyncio.ensure_future(
+            media_session.send(
+                raw.functions.upload.GetFile(location=location, offset=off, limit=CHUNK_SIZE)
+            )
+        )
+
     written = 0
-    current_part = 1
-    r = await media_session.send(
-        raw.functions.upload.GetFile(location=location, offset=offset, limit=CHUNK_SIZE)
-    )
-    if isinstance(r, raw.types.upload.File):
-        while current_part <= part_count:
-            chunk = r.bytes
-            if not chunk:
+    next_req = _fetch(offset)
+    try:
+        for current_part in range(1, part_count + 1):
+            r = await next_req
+            # Kick off the next fetch BEFORE writing, so Telegram I/O overlaps the socket write.
+            if current_part < part_count:
+                offset += CHUNK_SIZE
+                next_req = _fetch(offset)
+            else:
+                next_req = None
+
+            if not isinstance(r, raw.types.upload.File) or not r.bytes:
                 break
+            chunk = r.bytes
             if part_count == 1:
                 chunk = chunk[first_part_cut:last_part_cut]
             elif current_part == 1:
@@ -117,12 +132,7 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
 
             await response.write(chunk)
             written += len(chunk)
-
-            current_part += 1
-            offset += CHUNK_SIZE
-            if current_part > part_count:
-                break
-            r = await media_session.send(
-                raw.functions.upload.GetFile(location=location, offset=offset, limit=CHUNK_SIZE)
-            )
+    finally:
+        if next_req is not None:
+            next_req.cancel()
     return written
