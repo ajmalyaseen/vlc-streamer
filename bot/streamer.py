@@ -13,13 +13,14 @@ import logging
 import math
 
 from pyrogram import Client, raw
-from pyrogram.errors import AuthBytesInvalid
+from pyrogram.errors import AuthBytesInvalid, FloodWait
 from pyrogram.file_id import FileId, FileType
 from pyrogram.session import Auth, Session
 
 log = logging.getLogger("streamer")
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's fixed max part size
+MAX_FLOOD_WAIT = 20       # seconds; obey short Telegram GetFile rate-limits, give up beyond this
 
 
 async def get_media_session(client: Client, file_id: FileId) -> Session:
@@ -101,12 +102,22 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
     last_part_cut = (end % CHUNK_SIZE) + 1
     part_count = math.ceil((end + 1) / CHUNK_SIZE) - math.floor(offset / CHUNK_SIZE)
 
+    async def _fetch_chunk(off: int):
+        # Obey short Telegram GetFile rate-limits (FloodWait) instead of dropping
+        # the connection — turns heavy-load floods into a brief pause, not a failure.
+        while True:
+            try:
+                return await media_session.send(
+                    raw.functions.upload.GetFile(location=location, offset=off, limit=CHUNK_SIZE)
+                )
+            except FloodWait as e:
+                wait = int(getattr(e, "value", 0) or 0)
+                if wait > MAX_FLOOD_WAIT:
+                    raise
+                await asyncio.sleep(wait + 1)
+
     def _fetch(off: int):
-        return asyncio.ensure_future(
-            media_session.send(
-                raw.functions.upload.GetFile(location=location, offset=off, limit=CHUNK_SIZE)
-            )
-        )
+        return asyncio.ensure_future(_fetch_chunk(off))
 
     written = 0
     next_req = _fetch(offset)
