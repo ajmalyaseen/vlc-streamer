@@ -426,6 +426,24 @@ async def verify_payment_handler(request: web.Request) -> web.Response:
     return web.json_response({"success": bool(ok)}, status=200 if ok else 400)
 
 
+async def webhook_handler(request: web.Request) -> web.Response:
+    """Razorpay server-to-server webhook (reliable fulfillment).
+
+    Razorpay calls this even if the user closed the browser before the
+    client-side verify ran, so the plan still activates. Always returns 200 on
+    a valid signature (even for events we ignore) so Razorpay stops retrying."""
+    payments = request.app.get("payments")
+    if not payments:
+        return web.Response(status=200, text="ignored")
+    body = await request.read()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    try:
+        await payments.fulfill_from_webhook(body, signature)
+    except Exception:
+        log.exception("webhook processing failed")
+    return web.Response(status=200, text="ok")
+
+
 async def index(_request: web.Request) -> web.Response:
     return web.Response(text="Telegram → VLC stream bot is running.")
 
@@ -452,4 +470,5 @@ def make_app(bot: Client, cfg: Config, clients=None, payments=None) -> web.Appli
     app.router.add_get("/checkout/{reference}", checkout_handler)
     app.router.add_post("/api/create-order", create_order_handler)
     app.router.add_post("/api/verify-payment", verify_payment_handler)
+    app.router.add_post("/webhook", webhook_handler)
     return app

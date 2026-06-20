@@ -130,7 +130,7 @@ class PaymentService:
         return {"order_id": data["id"], "amount": data["amount"], "currency": "INR"}
 
     async def verify_and_fulfill(self, reference, order_id, payment_id, signature) -> bool:
-        """Verify Razorpay signature and activate the plan (idempotent)."""
+        """Verify Razorpay client-side signature and activate the plan (idempotent)."""
         payment = await self.db.get_payment(reference)
         if not payment:
             return False
@@ -142,8 +142,54 @@ class PaymentService:
         if not hmac.compare_digest(expected, signature or ""):
             log.warning("Razorpay signature mismatch for %s", reference)
             return False
+        return await self._activate(payment, payment_id)
+
+    async def fulfill_from_webhook(self, body: bytes, signature: str) -> bool:
+        """Verify a Razorpay webhook (payment.captured) and activate the plan.
+
+        This is the reliable path: Razorpay calls us server-to-server even if the
+        user closed the browser before the client-side verify ran. Idempotent."""
+        secret = self.cfg.razorpay_webhook_secret
+        if not secret:
+            log.warning("Webhook received but RAZORPAY_WEBHOOK_SECRET not set")
+            return False
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature or ""):
+            log.warning("Razorpay webhook signature mismatch")
+            return False
+        import json
+
+        try:
+            event = json.loads(body.decode())
+        except Exception:
+            log.exception("Webhook body not valid JSON")
+            return False
+        # The order receipt is our payment reference (set in create_order).
+        entity = (
+            event.get("payload", {}).get("payment", {}).get("entity", {})
+        )
+        order_entity = (
+            event.get("payload", {}).get("order", {}).get("entity", {})
+        )
+        reference = (
+            (entity.get("notes") or {}).get("reference")
+            or order_entity.get("receipt")
+        )
+        payment_id = entity.get("id")
+        if not reference:
+            log.warning("Webhook missing reference; event=%s", event.get("event"))
+            return False
+        payment = await self.db.get_payment(reference)
+        if not payment:
+            log.warning("Webhook reference %s not found in DB", reference)
+            return False
+        return await self._activate(payment, payment_id)
+
+    async def _activate(self, payment, payment_id) -> bool:
+        """Activate the plan for a verified payment and notify the user. Idempotent."""
+        reference = payment["_id"]
         if payment.get("status") == "approved":
-            return True  # idempotent
+            return True  # idempotent: already fulfilled (e.g. client-verify won the race)
         expires = await self.subs.set_plan(payment["user_id"], payment["plan"], VALIDITY_DAYS)
         await self.db.update_payment(reference, {
             "status": "approved",
