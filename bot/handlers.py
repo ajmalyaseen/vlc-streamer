@@ -42,17 +42,45 @@ ABOUT_TEXT = (
 )
 
 
-def main_menu_markup() -> InlineKeyboardMarkup:
+def welcome_text(name: str) -> str:
+    return (
+        f"👋 Hai {name},\n\n"
+        "I am a **File to VLC Stream Link** bot.\n"
+        "Send me any video file (MP4 / MKV) and I'll give you a direct "
+        "streaming link you can open in VLC.\n\n"
+        f"✨ Maintained by [Alaska bots]({CHANNEL_LINK})"
+    )
+
+
+def welcome_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK)],
             [
-                InlineKeyboardButton("📂 Generate Link", callback_data="menu_generate"),
-                InlineKeyboardButton("💎 Premium Plans", callback_data="menu_plans"),
+                InlineKeyboardButton("💡 Help", callback_data="help"),
+                InlineKeyboardButton("📂 About", callback_data="about"),
             ],
-            [
-                InlineKeyboardButton("📊 My Plan", callback_data="menu_myplan"),
-                InlineKeyboardButton("ℹ️ Help", callback_data="help"),
-            ],
+            [InlineKeyboardButton("⚙️ Manage", callback_data="menu_manage")],
+            [InlineKeyboardButton("🔐 Close", callback_data="close")],
+        ]
+    )
+
+
+def dashboard_text(state) -> str:
+    return (
+        "Welcome to Alaska Stream 🚀\n\n"
+        "Convert Telegram files into VLC streaming links instantly.\n\n"
+        f"**Current Plan:** {state.plan.name}\n"
+        f"**Today's Usage:** {state.used_today} / {state.plan.daily_links} links used"
+    )
+
+
+def dashboard_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💎 Premium Plans", callback_data="menu_plans")],
+            [InlineKeyboardButton("📊 My Plan", callback_data="menu_myplan")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_home")],
         ]
     )
 
@@ -60,15 +88,6 @@ def main_menu_markup() -> InlineKeyboardMarkup:
 def back_home_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("🔙 Back", callback_data="menu_home")]]
-    )
-
-
-def start_text(name: str, state) -> str:
-    return (
-        f"Welcome to Alaska Stream 🚀\n\n"
-        "Convert Telegram files into VLC streaming links instantly.\n\n"
-        f"**Current Plan:** {state.plan.name}\n"
-        f"**Today's Usage:** {state.used_today} / {state.plan.daily_links} links used"
     )
 
 
@@ -183,10 +202,11 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
 
     @app.on_message(filters.command("start") & filters.private)
     async def on_start(_c: Client, m: Message):
-        state = await subs.get_state(m.from_user)
+        await subs.get_state(m.from_user)  # ensure user + lazy refresh
+        name = m.from_user.first_name if m.from_user else "there"
         await m.reply_text(
-            start_text(m.from_user.first_name if m.from_user else "there", state),
-            reply_markup=main_menu_markup(),
+            welcome_text(name),
+            reply_markup=welcome_markup(),
             disable_web_page_preview=True,
             quote=True,
         )
@@ -361,11 +381,21 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
                 "Please wait for an admin to review your current request before creating a new one."
             )
             return
+        pay_page = (
+            f"{cfg.base_url}/pay?pa={quote(cfg.upi_id)}&pn=Alaska%20Stream"
+            f"&am={res.amount}&tn={quote(res.reference)}"
+        )
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("💳 Open UPI App", url=pay_page)]]
+        )
         await cq.message.reply_text(
             f"💳 **Pay ₹{res.amount} for {plan.name}**\n\n"
-            f"Reference: `{res.reference}`\n\n"
-            f"Tap to pay via any UPI app:\n{res.upi_link}\n\n"
+            f"Reference: `{res.reference}`\n"
+            f"UPI ID: `{cfg.upi_id}`\n\n"
+            "Tap **Open UPI App** to pay with the amount pre-filled, "
+            "or pay manually to the UPI ID above.\n\n"
             "After paying, send the **last 4 digits of your UTR** here to submit for verification.",
+            reply_markup=markup,
             disable_web_page_preview=True,
         )
 
@@ -374,13 +404,17 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
         data = cq.data or ""
 
         if data == "menu_home":
+            name = cq.from_user.first_name if cq.from_user else "there"
+            await cq.message.edit_text(
+                welcome_text(name), reply_markup=welcome_markup(),
+                disable_web_page_preview=True,
+            )
+        elif data == "menu_manage":
             state = await subs.get_state(cq.from_user)
             await cq.message.edit_text(
-                start_text(cq.from_user.first_name if cq.from_user else "there", state),
-                reply_markup=main_menu_markup(), disable_web_page_preview=True,
+                dashboard_text(state), reply_markup=dashboard_markup(),
+                disable_web_page_preview=True,
             )
-        elif data == "menu_generate":
-            await cq.answer("Send me a video file to get a streaming link.", show_alert=True)
         elif data in ("menu_plans", "plans"):
             await cq.message.edit_text(
                 plansmod.format_plans_text(plans),

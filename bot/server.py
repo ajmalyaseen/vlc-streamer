@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from aiohttp import web
 from pyrogram import Client
@@ -270,6 +270,33 @@ async def watch_handler(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html")
 
 
+async def pay_handler(request: web.Request) -> web.Response:
+    """Redirect to a UPI deep link so a UPI app opens with details pre-filled.
+    (Telegram won't allow upi:// directly in a button, so the button points here.)"""
+    pa = request.query.get("pa", "")
+    pn = request.query.get("pn", "Payment")
+    am = request.query.get("am", "")
+    tn = request.query.get("tn", "")
+    upi = "upi://pay?" + urlencode(
+        {"pa": pa, "pn": pn, "am": am, "cu": "INR", "tn": tn}, quote_via=quote
+    )
+    upi_attr = escape(upi, quote=True)
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Open UPI</title>"
+        "<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;"
+        "color:#eaeaea;text-align:center;padding-top:22vh}a.btn{display:inline-block;margin-top:16px;"
+        "padding:14px 22px;background:#ff8800;color:#111;border-radius:10px;text-decoration:none;"
+        "font-weight:700}p{color:#9aa0aa}</style></head><body>"
+        f"<h2>Opening your UPI app…</h2><p>Amount ₹{escape(am)} · {escape(tn)}</p>"
+        f"<a class='btn' href='{upi_attr}'>Tap to pay</a>"
+        f"<script>location.href=\"{upi}\";</script>"
+        "</body></html>"
+    )
+    return web.Response(text=html, content_type="text/html")
+
+
 async def index(_request: web.Request) -> web.Response:
     return web.Response(text="Telegram → VLC stream bot is running.")
 
@@ -291,4 +318,5 @@ def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
     # add_get also registers HEAD automatically; the handler checks request.method.
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     app.router.add_get("/watch/{chat_id}/{msg_id}/{name}", watch_handler)
+    app.router.add_get("/pay", pay_handler)
     return app
