@@ -16,6 +16,24 @@ class Config:
     force_sub: str = ""       # channel username/id users must join (bot must be admin)
     force_sub_invite: str = ""  # join link for the button (defaults to t.me/<username>)
     worker_tokens: tuple = ()   # extra bot tokens for parallel streaming (need LOG_CHANNEL)
+    # --- subscription / payments ---
+    upi_id: str = ""            # UPI ID for payments; empty disables purchases
+    admin_group_id: int = 0     # group where payment requests are posted (0 = DM admins)
+    support_link: str = "https://t.me/alaska_in"  # "Contact Support" button target
+    razorpay_key_id: str = ""        # Razorpay Standard Checkout key id
+    razorpay_key_secret: str = ""    # Razorpay key secret (server-side only)
+    razorpay_webhook_secret: str = ""  # optional webhook signing secret
+    plus_price: int = 27        # rupees / 30 days
+    pro_price: int = 67
+    free_daily: int = 2         # links per day
+    plus_daily: int = 20
+    pro_daily: int = 100
+    free_max_gb: float = 2.0    # max file size (GB)
+    plus_max_gb: float = 4.0
+    pro_max_gb: float = 10.0
+    free_expiry_h: int = 6      # stream-link validity (hours)
+    plus_expiry_h: int = 24
+    pro_expiry_h: int = 168
     port: int = 8080
     bind_host: str = "0.0.0.0"
     workers: int = 4
@@ -61,6 +79,20 @@ def _parse_worker_tokens() -> tuple:
     return tuple(t for t in tokens if t)
 
 
+def _f(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _i(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def load_config() -> Config:
     return Config(
         api_id=int(_require("API_ID")),
@@ -75,6 +107,23 @@ def load_config() -> Config:
         force_sub=os.environ.get("FORCE_SUB_CHANNEL", "").strip(),
         force_sub_invite=os.environ.get("FORCE_SUB_INVITE", "").strip(),
         worker_tokens=_parse_worker_tokens(),
+        upi_id=os.environ.get("UPI_ID", "").strip(),
+        admin_group_id=int(os.environ.get("ADMIN_GROUP_ID", "0") or "0"),
+        support_link=os.environ.get("SUPPORT_LINK", "https://t.me/alaska_in").strip(),
+        razorpay_key_id=os.environ.get("RAZORPAY_KEY_ID", "").strip(),
+        razorpay_key_secret=os.environ.get("RAZORPAY_KEY_SECRET", "").strip(),
+        razorpay_webhook_secret=os.environ.get("RAZORPAY_WEBHOOK_SECRET", "").strip(),
+        plus_price=_i("PLUS_PRICE", 27),
+        pro_price=_i("PRO_PRICE", 67),
+        free_daily=_i("FREE_DAILY", 2),
+        plus_daily=_i("PLUS_DAILY", 20),
+        pro_daily=_i("PRO_DAILY", 100),
+        free_max_gb=_f("FREE_MAX_GB", 2.0),
+        plus_max_gb=_f("PLUS_MAX_GB", 4.0),
+        pro_max_gb=_f("PRO_MAX_GB", 10.0),
+        free_expiry_h=_i("FREE_EXPIRY_H", 6),
+        plus_expiry_h=_i("PLUS_EXPIRY_H", 24),
+        pro_expiry_h=_i("PRO_EXPIRY_H", 168),
         port=int(os.environ.get("PORT", "8080")),
         bind_host=os.environ.get("BIND_HOST", "0.0.0.0"),
         workers=int(os.environ.get("WORKERS", "4")),

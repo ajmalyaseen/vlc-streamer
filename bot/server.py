@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from aiohttp import web
 from pyrogram import Client
@@ -160,8 +160,11 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         return web.Response(status=400, text="Bad chat or message id")
 
     token = request.query.get("hash", "")
-    if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
+    exp = int(request.query.get("exp", "0") or "0")
+    if not verify_token(chat_id, msg_id, token, cfg.hash_secret, exp):
         return web.Response(status=403, text="Invalid or missing token")
+    if exp and exp < int(time.time()):
+        return web.Response(status=410, text="This link has expired")
 
     # Distribute each request to the least-busy eligible client so VLC's many
     # parallel connections for one file spread across bots instead of piling
@@ -256,13 +259,189 @@ async def watch_handler(request: web.Request) -> web.Response:
         return web.Response(status=400, text="Bad chat or message id")
 
     token = request.query.get("hash", "")
-    if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
+    exp = int(request.query.get("exp", "0") or "0")
+    if not verify_token(chat_id, msg_id, token, cfg.hash_secret, exp):
         return web.Response(status=403, text="Invalid or missing token")
 
     name = request.match_info["name"]
-    stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}"
+    suffix = f"&exp={exp}" if exp else ""
+    stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}{suffix}"
     html = WATCH_PAGE.format(name=escape(name), stream=escape(stream_url, quote=True))
     return web.Response(text=html, content_type="text/html")
+
+
+async def pay_handler(request: web.Request) -> web.Response:
+    """Show a UPI-app chooser. Each button opens that app's deep link with the
+    payee/amount/note pre-filled. (Telegram won't allow upi:// in a button, so
+    the bot button points here.)"""
+    pa = request.query.get("pa", "")
+    pn = request.query.get("pn", "Payment")
+    am = request.query.get("am", "")
+    tn = request.query.get("tn", "")
+    q = urlencode({"pa": pa, "pn": pn, "am": am, "cu": "INR", "tn": tn}, quote_via=quote)
+
+    # App-specific UPI deep-link schemes (same query params).
+    links = {
+        "gpay": "tez://upi/pay?" + q,
+        "phonepe": "phonepe://pay?" + q,
+        "paytm": "paytmmp://pay?" + q,
+        "upi": "upi://pay?" + q,
+    }
+
+    def btn(href, bg, fg, label):
+        return (
+            f"<a class='btn' style='background:{bg};color:{fg}' "
+            f"href='{escape(href, quote=True)}'>{label}</a>"
+        )
+
+    buttons = (
+        btn(links["gpay"], "#ffffff", "#3c4043", "🟢🔵🔴🟡 &nbsp; Google Pay")
+        + btn(links["phonepe"], "#5f259f", "#ffffff", "🟣 &nbsp; PhonePe")
+        + btn(links["paytm"], "#00baf2", "#ffffff", "🔵 &nbsp; Paytm")
+        + btn(links["upi"], "#ff8800", "#111111", "💳 &nbsp; Any UPI App")
+    )
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Choose UPI App</title>"
+        "<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;"
+        "color:#eaeaea;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}"
+        ".card{background:#171a21;padding:26px 22px;border-radius:16px;width:90%;max-width:380px;"
+        "text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.4)}"
+        ".btn{display:block;margin:10px 0;padding:14px;border-radius:10px;text-decoration:none;"
+        "font-weight:700}h2{margin:0 0 4px}p{color:#9aa0aa;margin:0 0 16px;font-size:14px}"
+        ".hint{color:#7d828c;font-size:12px;margin-top:16px}</style></head><body>"
+        "<div class='card'>"
+        f"<h2>Pay ₹{escape(am)}</h2><p>To {escape(pa)} · Ref {escape(tn)}</p>"
+        f"{buttons}"
+        "<p class='hint'>Pick your app — amount &amp; note are pre-filled. "
+        "After paying, send the last 4 digits of your UTR to the bot.</p>"
+        "</div></body></html>"
+    )
+    return web.Response(text=html, content_type="text/html")
+
+
+CHECKOUT_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alaska Stream — Checkout</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#eaeaea;
+text-align:center;padding-top:20vh}#msg{margin-top:18px;color:#9aa0aa;font-size:15px}
+.btn{display:inline-block;margin-top:14px;padding:13px 22px;background:#ff8800;color:#111;
+border-radius:10px;text-decoration:none;font-weight:700;border:0;font-size:15px}</style>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script></head>
+<body>
+<h2>Alaska Stream</h2>
+<p id="msg">Starting secure checkout…</p>
+<button class="btn" onclick="start()">Pay now</button>
+<script>
+var REFERENCE = "__REF__";
+var TOKEN = "__TOKEN__";
+async function start(){
+  document.getElementById('msg').innerText = 'Starting secure checkout…';
+  var o;
+  try {
+    o = await fetch('/api/create-order',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({reference:REFERENCE, token:TOKEN})}).then(function(r){return r.json();});
+  } catch(e){ document.getElementById('msg').innerText='Network error. Try again.'; return; }
+  if(!o || !o.order_id){ document.getElementById('msg').innerText='Could not start payment. Please try again.'; return; }
+  var rzp = new Razorpay({
+    key:o.key_id, order_id:o.order_id, amount:o.amount, currency:o.currency,
+    name:o.name||'Alaska Stream', description:o.description||'Subscription',
+    handler: async function(resp){
+      document.getElementById('msg').innerText='Verifying payment…';
+      var v = await fetch('/api/verify-payment',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({reference:REFERENCE, razorpay_order_id:resp.razorpay_order_id,
+          razorpay_payment_id:resp.razorpay_payment_id, razorpay_signature:resp.razorpay_signature})
+        }).then(function(r){return r.json();});
+      document.getElementById('msg').innerText = v.success
+        ? '✅ Payment successful! Your plan is now active. You can return to Telegram.'
+        : '⚠️ Verification failed. If money was deducted, contact support.';
+    },
+    modal:{ondismiss:function(){document.getElementById('msg').innerText='Payment cancelled.';}}
+  });
+  rzp.on('payment.failed', function(r){
+    document.getElementById('msg').innerText='Payment failed: '+((r.error&&r.error.description)||'try again');
+  });
+  rzp.open();
+}
+window.onload = start;
+</script></body></html>"""
+
+
+async def checkout_handler(request: web.Request) -> web.Response:
+    cfg: Config = request.app["config"]
+    payments = request.app.get("payments")
+    reference = request.match_info["reference"]
+    token = request.query.get("token", "")
+    from .utils import verify_payment_token
+    if not (payments and payments.razorpay_enabled) or not verify_payment_token(
+        reference, token, cfg.hash_secret
+    ):
+        return web.Response(status=403, text="Invalid or expired checkout link")
+    html = CHECKOUT_PAGE.replace("__REF__", reference).replace("__TOKEN__", token)
+    return web.Response(text=html, content_type="text/html")
+
+
+async def create_order_handler(request: web.Request) -> web.Response:
+    cfg: Config = request.app["config"]
+    payments = request.app.get("payments")
+    if not (payments and payments.razorpay_enabled):
+        return web.json_response({"error": "payments disabled"}, status=400)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    reference = data.get("reference", "")
+    token = data.get("token", "")
+    from .utils import verify_payment_token
+    if not verify_payment_token(reference, token, cfg.hash_secret):
+        return web.json_response({"error": "invalid token"}, status=403)
+    order = await payments.create_order(reference)
+    if not order:
+        return web.json_response({"error": "could not create order"}, status=500)
+    return web.json_response({
+        **order,
+        "key_id": cfg.razorpay_key_id,
+        "name": "Alaska Stream",
+        "description": f"Subscription {reference}",
+    })
+
+
+async def verify_payment_handler(request: web.Request) -> web.Response:
+    payments = request.app.get("payments")
+    if not payments:
+        return web.json_response({"error": "payments disabled"}, status=400)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ref = data.get("reference")
+    oid = data.get("razorpay_order_id")
+    pid = data.get("razorpay_payment_id")
+    sig = data.get("razorpay_signature")
+    if not all([ref, oid, pid, sig]):
+        return web.json_response({"error": "missing fields"}, status=400)
+    ok = await payments.verify_and_fulfill(ref, oid, pid, sig)
+    return web.json_response({"success": bool(ok)}, status=200 if ok else 400)
+
+
+async def webhook_handler(request: web.Request) -> web.Response:
+    """Razorpay server-to-server webhook (reliable fulfillment).
+
+    Razorpay calls this even if the user closed the browser before the
+    client-side verify ran, so the plan still activates. Always returns 200 on
+    a valid signature (even for events we ignore) so Razorpay stops retrying."""
+    payments = request.app.get("payments")
+    if not payments:
+        return web.Response(status=200, text="ignored")
+    body = await request.read()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    try:
+        await payments.fulfill_from_webhook(body, signature)
+    except Exception:
+        log.exception("webhook processing failed")
+    return web.Response(status=200, text="ok")
 
 
 async def index(_request: web.Request) -> web.Response:
@@ -273,12 +452,13 @@ async def healthz(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
+def make_app(bot: Client, cfg: Config, clients=None, payments=None) -> web.Application:
     clients = clients or [bot]
     app = web.Application(client_max_size=1024 * 16)
     app["bot"] = bot
     app["config"] = cfg
     app["clients"] = clients
+    app["payments"] = payments
     app["active"] = [0] * len(clients)        # active streams per client (load monitor)
     app["meta_cache"] = {}                      # (chat,msg) -> entry with TTL
     app.router.add_get("/", index)
@@ -286,4 +466,9 @@ def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
     # add_get also registers HEAD automatically; the handler checks request.method.
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     app.router.add_get("/watch/{chat_id}/{msg_id}/{name}", watch_handler)
+    app.router.add_get("/pay", pay_handler)
+    app.router.add_get("/checkout/{reference}", checkout_handler)
+    app.router.add_post("/api/create-order", create_order_handler)
+    app.router.add_post("/api/verify-payment", verify_payment_handler)
+    app.router.add_post("/webhook", webhook_handler)
     return app

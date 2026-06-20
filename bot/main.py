@@ -26,11 +26,16 @@ _pyro_utils.MIN_CHANNEL_ID = -100_999_999_999_999
 from .config import load_config
 from .db import make_user_db
 from .handlers import register_handlers
+from .payments import PaymentService
+from .plans import build_plans
 from .server import make_app
+from .subscription import SubscriptionService
 
 
 BOT_COMMANDS = [
     BotCommand("start", "Check if the bot is alive"),
+    BotCommand("plans", "View Premium plans"),
+    BotCommand("myplan", "View your current plan"),
     BotCommand("help", "How to use the bot"),
     BotCommand("about", "Know about the bot"),
 ]
@@ -91,7 +96,10 @@ async def run() -> None:
 
     bot = Client(**client_kwargs)
     db = make_user_db(cfg.database_url)
-    register_handlers(bot, cfg, db)
+    plans = build_plans(cfg)
+    subs = SubscriptionService(db, plans)
+    payments = PaymentService(db, cfg, subs, plans, bot)
+    register_handlers(bot, cfg, db, subs, payments, plans)
 
     # Optional extra bot clients used to parallelize streaming across many
     # users. They can only read files in a shared LOG_CHANNEL, so they require
@@ -113,7 +121,7 @@ async def run() -> None:
     # 1) Start the HTTP server FIRST so Koyeb health checks pass immediately,
     #    even if the bot login is briefly delayed by a FloodWait.
     clients = [bot] + workers
-    app = make_app(bot, cfg, clients)
+    app = make_app(bot, cfg, clients, payments)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, cfg.bind_host, cfg.port)
