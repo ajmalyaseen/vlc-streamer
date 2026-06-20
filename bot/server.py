@@ -52,7 +52,7 @@ WATCH_PAGE = """<!doctype html>
        On desktop, copy the direct link and use VLC &rarr; Open Network Stream.</p>
   </div>
 <script>
-  var stream = "{stream}";
+  var stream = "{stream_js}";
   var ua = navigator.userAgent || "";
   var isiOS = /iPad|iPhone|iPod/.test(ua);
   var isAndroid = /Android/.test(ua);
@@ -266,7 +266,14 @@ async def watch_handler(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     suffix = f"&exp={exp}" if exp else ""
     stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}{suffix}"
-    html = WATCH_PAGE.format(name=escape(name), stream=escape(stream_url, quote=True))
+    # Two contexts: the <a href> needs HTML-escaped "&amp;" (browser decodes it back),
+    # but the JS string variable needs the RAW url — JS does not decode HTML entities,
+    # so "&amp;" there would literally reach VLC and break the query string (exp lost).
+    html = WATCH_PAGE.format(
+        name=escape(name),
+        stream=escape(stream_url, quote=True),
+        stream_js=stream_url,
+    )
     return web.Response(text=html, content_type="text/html")
 
 
