@@ -8,6 +8,7 @@ from urllib.parse import quote
 from aiohttp import web
 from pyrogram import Client
 from pyrogram.errors import FileReferenceExpired
+from pyrogram.file_id import FileId
 from pyrogram.types import Message
 
 from .config import Config
@@ -126,7 +127,7 @@ async def _get_entry(app: web.Application, ci: int, chat_id: int, msg_id: int):
     if not media:
         return None
     entry = {
-        "message": message,
+        "file_id": FileId.decode(media.file_id),
         "size": media.file_size,
         "mime": media.mime_type or "application/octet-stream",
         "name": getattr(media, "file_name", None) or f"file_{msg_id}",
@@ -137,14 +138,16 @@ async def _get_entry(app: web.Application, ci: int, chat_id: int, msg_id: int):
 
 
 async def _refresh_entry(app: web.Application, ci: int, chat_id: int, msg_id: int):
-    """Re-fetch a fresh message (new file reference) for client ci."""
+    """Re-decode a fresh file reference for client ci (on FileReferenceExpired)."""
     client = app["clients"][ci]
     message = await client.get_messages(chat_id, msg_id)
+    media = _extract_media(message)
+    file_id = FileId.decode(media.file_id)
     entry = app["meta_cache"].get((ci, chat_id, msg_id))
     if entry:
-        entry["message"] = message
+        entry["file_id"] = file_id
         entry["expiry"] = time.monotonic() + CACHE_TTL
-    return message
+    return file_id
 
 
 async def stream_handler(request: web.Request) -> web.StreamResponse:
@@ -180,7 +183,7 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         mime = entry["mime"]
         file_name = entry["name"]
         client = request.app["clients"][ci]
-        message = entry["message"]
+        file_id = entry["file_id"]
 
         # ---- Range handling ----
         start, end, status = 0, file_size - 1, 200
@@ -223,11 +226,11 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
                  msg_id, cname, start, end, active)
         try:
             try:
-                await stream_to_response(client, message, start, end, response)
+                await stream_to_response(client, file_id, start, end, response)
             except FileReferenceExpired:
-                # Reference expired (before any bytes sent): refresh + retry once.
-                message = await _refresh_entry(request.app, ci, chat_id, msg_id)
-                await stream_to_response(client, message, start, end, response)
+                # Reference expired: refresh + retry once (occurs before any bytes sent).
+                file_id = await _refresh_entry(request.app, ci, chat_id, msg_id)
+                await stream_to_response(client, file_id, start, end, response)
         except (ConnectionError, asyncio.CancelledError):
             pass  # client disconnected mid-stream (normal during seeking)
         except Exception as e:
