@@ -19,6 +19,9 @@ class Config:
     # --- subscription / payments ---
     upi_id: str = ""            # UPI ID for payments; empty disables purchases
     admin_group_id: int = 0     # group where payment requests are posted (0 = DM admins)
+    razorpay_key_id: str = ""        # Razorpay Standard Checkout key id
+    razorpay_key_secret: str = ""    # Razorpay key secret (server-side only)
+    razorpay_webhook_secret: str = ""  # optional webhook signing secret
     plus_price: int = 27        # rupees / 30 days
     pro_price: int = 67
     free_daily: int = 2         # links per day
@@ -105,6 +108,9 @@ def load_config() -> Config:
         worker_tokens=_parse_worker_tokens(),
         upi_id=os.environ.get("UPI_ID", "").strip(),
         admin_group_id=int(os.environ.get("ADMIN_GROUP_ID", "0") or "0"),
+        razorpay_key_id=os.environ.get("RAZORPAY_KEY_ID", "").strip(),
+        razorpay_key_secret=os.environ.get("RAZORPAY_KEY_SECRET", "").strip(),
+        razorpay_webhook_secret=os.environ.get("RAZORPAY_WEBHOOK_SECRET", "").strip(),
         plus_price=_i("PLUS_PRICE", 27),
         pro_price=_i("PRO_PRICE", 67),
         free_daily=_i("FREE_DAILY", 2),

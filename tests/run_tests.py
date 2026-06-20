@@ -36,6 +36,11 @@ class Cfg:
     upi_id: str = "alaska@upi"
     admin_group_id: int = 0
     admins: tuple = (999,)
+    hash_secret: str = "test-secret"
+    base_url: str = "https://test.example"
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    razorpay_webhook_secret: str = ""
     plus_price: int = 27
     pro_price: int = 67
     free_daily: int = 2

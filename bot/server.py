@@ -321,6 +321,111 @@ async def pay_handler(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html")
 
 
+CHECKOUT_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alaska Stream — Checkout</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#eaeaea;
+text-align:center;padding-top:20vh}#msg{margin-top:18px;color:#9aa0aa;font-size:15px}
+.btn{display:inline-block;margin-top:14px;padding:13px 22px;background:#ff8800;color:#111;
+border-radius:10px;text-decoration:none;font-weight:700;border:0;font-size:15px}</style>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script></head>
+<body>
+<h2>Alaska Stream</h2>
+<p id="msg">Starting secure checkout…</p>
+<button class="btn" onclick="start()">Pay now</button>
+<script>
+var REFERENCE = "__REF__";
+var TOKEN = "__TOKEN__";
+async function start(){
+  document.getElementById('msg').innerText = 'Starting secure checkout…';
+  var o;
+  try {
+    o = await fetch('/api/create-order',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({reference:REFERENCE, token:TOKEN})}).then(function(r){return r.json();});
+  } catch(e){ document.getElementById('msg').innerText='Network error. Try again.'; return; }
+  if(!o || !o.order_id){ document.getElementById('msg').innerText='Could not start payment. Please try again.'; return; }
+  var rzp = new Razorpay({
+    key:o.key_id, order_id:o.order_id, amount:o.amount, currency:o.currency,
+    name:o.name||'Alaska Stream', description:o.description||'Subscription',
+    handler: async function(resp){
+      document.getElementById('msg').innerText='Verifying payment…';
+      var v = await fetch('/api/verify-payment',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({reference:REFERENCE, razorpay_order_id:resp.razorpay_order_id,
+          razorpay_payment_id:resp.razorpay_payment_id, razorpay_signature:resp.razorpay_signature})
+        }).then(function(r){return r.json();});
+      document.getElementById('msg').innerText = v.success
+        ? '✅ Payment successful! Your plan is now active. You can return to Telegram.'
+        : '⚠️ Verification failed. If money was deducted, contact support.';
+    },
+    modal:{ondismiss:function(){document.getElementById('msg').innerText='Payment cancelled.';}}
+  });
+  rzp.on('payment.failed', function(r){
+    document.getElementById('msg').innerText='Payment failed: '+((r.error&&r.error.description)||'try again');
+  });
+  rzp.open();
+}
+window.onload = start;
+</script></body></html>"""
+
+
+async def checkout_handler(request: web.Request) -> web.Response:
+    cfg: Config = request.app["config"]
+    payments = request.app.get("payments")
+    reference = request.match_info["reference"]
+    token = request.query.get("token", "")
+    from .utils import verify_payment_token
+    if not (payments and payments.razorpay_enabled) or not verify_payment_token(
+        reference, token, cfg.hash_secret
+    ):
+        return web.Response(status=403, text="Invalid or expired checkout link")
+    html = CHECKOUT_PAGE.replace("__REF__", reference).replace("__TOKEN__", token)
+    return web.Response(text=html, content_type="text/html")
+
+
+async def create_order_handler(request: web.Request) -> web.Response:
+    cfg: Config = request.app["config"]
+    payments = request.app.get("payments")
+    if not (payments and payments.razorpay_enabled):
+        return web.json_response({"error": "payments disabled"}, status=400)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    reference = data.get("reference", "")
+    token = data.get("token", "")
+    from .utils import verify_payment_token
+    if not verify_payment_token(reference, token, cfg.hash_secret):
+        return web.json_response({"error": "invalid token"}, status=403)
+    order = await payments.create_order(reference)
+    if not order:
+        return web.json_response({"error": "could not create order"}, status=500)
+    return web.json_response({
+        **order,
+        "key_id": cfg.razorpay_key_id,
+        "name": "Alaska Stream",
+        "description": f"Subscription {reference}",
+    })
+
+
+async def verify_payment_handler(request: web.Request) -> web.Response:
+    payments = request.app.get("payments")
+    if not payments:
+        return web.json_response({"error": "payments disabled"}, status=400)
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    ref = data.get("reference")
+    oid = data.get("razorpay_order_id")
+    pid = data.get("razorpay_payment_id")
+    sig = data.get("razorpay_signature")
+    if not all([ref, oid, pid, sig]):
+        return web.json_response({"error": "missing fields"}, status=400)
+    ok = await payments.verify_and_fulfill(ref, oid, pid, sig)
+    return web.json_response({"success": bool(ok)}, status=200 if ok else 400)
+
+
 async def index(_request: web.Request) -> web.Response:
     return web.Response(text="Telegram → VLC stream bot is running.")
 
@@ -329,12 +434,13 @@ async def healthz(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
+def make_app(bot: Client, cfg: Config, clients=None, payments=None) -> web.Application:
     clients = clients or [bot]
     app = web.Application(client_max_size=1024 * 16)
     app["bot"] = bot
     app["config"] = cfg
     app["clients"] = clients
+    app["payments"] = payments
     app["active"] = [0] * len(clients)        # active streams per client (load monitor)
     app["meta_cache"] = {}                      # (chat,msg) -> entry with TTL
     app.router.add_get("/", index)
@@ -343,4 +449,7 @@ def make_app(bot: Client, cfg: Config, clients=None) -> web.Application:
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     app.router.add_get("/watch/{chat_id}/{msg_id}/{name}", watch_handler)
     app.router.add_get("/pay", pay_handler)
+    app.router.add_get("/checkout/{reference}", checkout_handler)
+    app.router.add_post("/api/create-order", create_order_handler)
+    app.router.add_post("/api/verify-payment", verify_payment_handler)
     return app

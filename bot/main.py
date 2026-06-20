@@ -121,7 +121,7 @@ async def run() -> None:
     # 1) Start the HTTP server FIRST so Koyeb health checks pass immediately,
     #    even if the bot login is briefly delayed by a FloodWait.
     clients = [bot] + workers
-    app = make_app(bot, cfg, clients)
+    app = make_app(bot, cfg, clients, payments)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, cfg.bind_host, cfg.port)

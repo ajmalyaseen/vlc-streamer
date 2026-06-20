@@ -369,7 +369,7 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
 
     # ---------------- callbacks ----------------
 
-    async def _send_upi(cq: CallbackQuery, plan_key: str):
+    async def _start_payment(cq: CallbackQuery, plan_key: str):
         plan = plans[plan_key]
         if not payments.enabled:
             await cq.message.reply_text("Payments are not enabled yet. Please contact support.")
@@ -381,13 +381,28 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
                 "Please wait for an admin to review your current request before creating a new one."
             )
             return
+        if res.error:
+            await cq.message.reply_text("Couldn't start payment right now. Please try again later.")
+            return
+
+        if res.provider == "razorpay":
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"💳 Pay ₹{res.amount}", url=res.pay_url)]]
+            )
+            await cq.message.reply_text(
+                f"💳 **{plan.name} Plan — ₹{res.amount}**\n\n"
+                "Tap **Pay** to checkout securely (UPI / Card / Wallet / Netbanking).\n"
+                "Your plan activates **automatically** the moment payment succeeds. ✅",
+                reply_markup=markup, disable_web_page_preview=True,
+            )
+            return
+
+        # manual UPI fallback
         pay_page = (
             f"{cfg.base_url}/pay?pa={quote(cfg.upi_id)}&pn=Alaska%20Stream"
             f"&am={res.amount}&tn={quote(res.reference)}"
         )
-        markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("💳 Open UPI App", url=pay_page)]]
-        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("💳 Open UPI App", url=pay_page)]])
         await cq.message.reply_text(
             f"💳 **Pay ₹{res.amount} for {plan.name}**\n\n"
             f"Reference: `{res.reference}`\n"
@@ -395,8 +410,7 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
             "Tap **Open UPI App** to pay with the amount pre-filled, "
             "or pay manually to the UPI ID above.\n\n"
             "After paying, send the **last 4 digits of your UTR** here to submit for verification.",
-            reply_markup=markup,
-            disable_web_page_preview=True,
+            reply_markup=markup, disable_web_page_preview=True,
         )
 
     @app.on_callback_query()
@@ -436,7 +450,7 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
             await cq.message.edit_text(plansmod.purchase_text(plan), reply_markup=markup)
         elif data in ("pay_plus", "pay_pro"):
             await cq.answer()
-            await _send_upi(cq, "plus" if data == "pay_plus" else "pro")
+            await _start_payment(cq, "plus" if data == "pay_plus" else "pro")
         elif data.startswith("approve_") or data.startswith("reject_"):
             if not _is_admin(cq.from_user):
                 await cq.answer("Not authorized.", show_alert=True)

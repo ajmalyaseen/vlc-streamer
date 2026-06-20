@@ -39,6 +39,16 @@ def make_payment_reference() -> str:
     return "P" + "".join(secrets.choice(alphabet) for _ in range(7))
 
 
+def make_payment_token(reference: str, secret: str) -> str:
+    """Signed token binding a checkout URL to a payment reference."""
+    mac = hmac.new(secret.encode(), reference.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:16]
+
+
+def verify_payment_token(reference: str, token: str, secret: str) -> bool:
+    return hmac.compare_digest(make_payment_token(reference, secret), token)
+
+
 def build_upi_link(upi_id: str, name: str, amount: int, note: str) -> str:
     """Build a upi://pay deep link openable by GPay/PhonePe/Paytm/BHIM."""
     params = {
