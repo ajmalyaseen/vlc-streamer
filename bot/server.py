@@ -160,8 +160,11 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         return web.Response(status=400, text="Bad chat or message id")
 
     token = request.query.get("hash", "")
-    if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
+    exp = int(request.query.get("exp", "0") or "0")
+    if not verify_token(chat_id, msg_id, token, cfg.hash_secret, exp):
         return web.Response(status=403, text="Invalid or missing token")
+    if exp and exp < int(time.time()):
+        return web.Response(status=410, text="This link has expired")
 
     # Distribute each request to the least-busy eligible client so VLC's many
     # parallel connections for one file spread across bots instead of piling
@@ -256,11 +259,13 @@ async def watch_handler(request: web.Request) -> web.Response:
         return web.Response(status=400, text="Bad chat or message id")
 
     token = request.query.get("hash", "")
-    if not verify_token(chat_id, msg_id, token, cfg.hash_secret):
+    exp = int(request.query.get("exp", "0") or "0")
+    if not verify_token(chat_id, msg_id, token, cfg.hash_secret, exp):
         return web.Response(status=403, text="Invalid or missing token")
 
     name = request.match_info["name"]
-    stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}"
+    suffix = f"&exp={exp}" if exp else ""
+    stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}{suffix}"
     html = WATCH_PAGE.format(name=escape(name), stream=escape(stream_url, quote=True))
     return web.Response(text=html, content_type="text/html")
 

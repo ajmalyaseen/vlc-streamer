@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 import logging
 from urllib.parse import quote
 
@@ -12,6 +13,7 @@ from pyrogram.types import (
     Message,
 )
 
+from . import plans as plansmod
 from .config import Config
 from .utils import human_size, make_token
 
@@ -19,30 +21,19 @@ log = logging.getLogger("handlers")
 
 DEVELOPER = "Ajmal Yaseen"
 CHANNEL_LINK = "https://t.me/alaska_in"
-VERSION = "v1.0.0"
-
-
-def start_text(name: str) -> str:
-    return (
-        f"👋 Hai {name},\n\n"
-        "I am a **File to VLC Stream Link** bot.\n"
-        "Send me any video file (MP4 / MKV) and I'll give you a direct "
-        "streaming link you can open in VLC.\n\n"
-        f"✨ Maintained by [Alaska bots]({CHANNEL_LINK})"
-    )
-
+VERSION = "v2.0.0"
 
 HELP_TEXT = (
     "💡 **How to use**\n\n"
     "1. Send me a video file (MP4 / MKV / etc.).\n"
     "2. I'll reply with a direct streaming link.\n"
     "3. Open **VLC → Media → Open Network Stream**, paste the link and play.\n\n"
-    "The link supports seeking, so you can jump around in the video."
+    "Use 💎 Premium Plans for larger files, more daily links, and longer link expiry."
 )
 
 ABOUT_TEXT = (
     "📂 **About Me**\n\n"
-    "❄ **Bot Name :** VLC Streamer\n"
+    "❄ **Bot Name :** Alaska Stream\n"
     "❄ **Framework :** Pyrogram\n"
     "❄ **Language :** Python\n"
     f"❄ **Version :** {VERSION}\n"
@@ -51,28 +42,56 @@ ABOUT_TEXT = (
 )
 
 
-def start_markup() -> InlineKeyboardMarkup:
+def main_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK)],
             [
-                InlineKeyboardButton("💡 Help", callback_data="help"),
-                InlineKeyboardButton("📂 About", callback_data="about"),
+                InlineKeyboardButton("📂 Generate Link", callback_data="menu_generate"),
+                InlineKeyboardButton("💎 Premium Plans", callback_data="menu_plans"),
             ],
-            [InlineKeyboardButton("🔐 Close", callback_data="close")],
-        ]
-    )
-
-
-def back_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
             [
-                InlineKeyboardButton("◀ Back", callback_data="back"),
-                InlineKeyboardButton("🔐 Close", callback_data="close"),
-            ]
+                InlineKeyboardButton("📊 My Plan", callback_data="menu_myplan"),
+                InlineKeyboardButton("ℹ️ Help", callback_data="help"),
+            ],
         ]
     )
+
+
+def back_home_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔙 Back", callback_data="menu_home")]]
+    )
+
+
+def start_text(name: str, state) -> str:
+    return (
+        f"Welcome to Alaska Stream 🚀\n\n"
+        "Convert Telegram files into VLC streaming links instantly.\n\n"
+        f"**Current Plan:** {state.plan.name}\n"
+        f"**Today's Usage:** {state.used_today} / {state.plan.daily_links} links used"
+    )
+
+
+def _expiry_str(expires_at) -> str:
+    if not expires_at:
+        return "—"
+    return expires_at.strftime("%d %b %Y")
+
+
+def myplan_text(state) -> str:
+    p = state.plan
+    body = (
+        f"📊 **My Plan**\n\n"
+        f"**Plan:** {p.emoji} {p.name}\n"
+        f"**Today's Usage:** {state.used_today} / {p.daily_links} links\n"
+    )
+    if p.key != "free":
+        body += f"**Valid Until:** {_expiry_str(state.expires_at)}\n"
+    body += (
+        f"**Max File Size:** {human_size(p.max_file_size)}\n"
+        f"**Link Expiry:** {plansmod._expiry_text(p.expiry_seconds)}"
+    )
+    return body
 
 
 def _invite_link(cfg: Config) -> str:
@@ -91,7 +110,6 @@ def fsub_markup(cfg: Config, file_msg_id: int) -> InlineKeyboardMarkup:
 
 
 async def is_subscribed(client: Client, cfg: Config, user_id: int) -> bool:
-    """True if force-sub is off, or the user is a member of the channel."""
     if not cfg.force_sub:
         return True
     try:
@@ -100,13 +118,12 @@ async def is_subscribed(client: Client, cfg: Config, user_id: int) -> bool:
     except UserNotParticipant:
         return False
     except Exception:
-        # Misconfig (e.g. bot not admin in channel) shouldn't lock everyone out.
         log.exception("force-sub check failed; allowing access")
         return True
 
 
-async def send_stream_link(client: Client, cfg: Config, file_message: Message, reply_to: Message) -> None:
-    """Generate and send the stream link + Watch Now button for a media message."""
+async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> bool:
+    """Store/locate the media and reply with a stream link. Returns True on success."""
     media = (
         file_message.document
         or file_message.video
@@ -115,7 +132,7 @@ async def send_stream_link(client: Client, cfg: Config, file_message: Message, r
     )
     if media is None:
         await reply_to.reply_text("That message has no streamable file.", quote=True)
-        return
+        return False
 
     if cfg.log_channel:
         try:
@@ -127,21 +144,24 @@ async def send_stream_link(client: Client, cfg: Config, file_message: Message, r
                 "the LOG_CHANNEL with permission to post messages.",
                 quote=True,
             )
-            return
+            return False
         chat_id = cfg.log_channel
         msg_id = stored.id
     else:
         chat_id = file_message.chat.id
         msg_id = file_message.id
 
-    token = make_token(chat_id, msg_id, cfg.hash_secret)
+    exp = int(dt.datetime.utcnow().timestamp()) + plan.expiry_seconds
+    token = make_token(chat_id, msg_id, cfg.hash_secret, exp)
     file_name = getattr(media, "file_name", None) or f"file_{msg_id}.mp4"
-    url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
-    watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{quote(file_name)}?hash={token}"
+    q = quote(file_name)
+    url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{q}?hash={token}&exp={exp}"
+    watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{q}?hash={token}&exp={exp}"
 
     await reply_to.reply_text(
         f"**File:** `{file_name}`\n"
-        f"**Size:** {human_size(media.file_size)}\n\n"
+        f"**Size:** {human_size(media.file_size)}\n"
+        f"**Plan:** {plan.emoji} {plan.name} · link valid {plansmod._expiry_text(plan.expiry_seconds)}\n\n"
         f"**Stream link:**\n`{url}`\n\n"
         f"Tap **▶️ Watch Now** to open directly in VLC, or paste the link "
         f"in VLC →  Media → Open Network Stream",
@@ -151,74 +171,163 @@ async def send_stream_link(client: Client, cfg: Config, file_message: Message, r
         disable_web_page_preview=True,
         quote=True,
     )
+    return True
 
 
-def register_handlers(app: Client, cfg: Config, db) -> None:
+def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> None:
+
+    def _is_admin(user) -> bool:
+        return bool(user) and user.id in cfg.admins
+
+    # ---------------- user menus ----------------
+
     @app.on_message(filters.command("start") & filters.private)
     async def on_start(_c: Client, m: Message):
-        if m.from_user:
-            await db.add_user(
-                m.from_user.id, m.from_user.username, m.from_user.first_name
-            )
-        name = m.from_user.mention if m.from_user else "there"
+        state = await subs.get_state(m.from_user)
         await m.reply_text(
-            start_text(name),
-            reply_markup=start_markup(),
+            start_text(m.from_user.first_name if m.from_user else "there", state),
+            reply_markup=main_menu_markup(),
             disable_web_page_preview=True,
             quote=True,
         )
 
+    @app.on_message(filters.command("plans") & filters.private)
+    async def on_plans(_c: Client, m: Message):
+        await subs.get_state(m.from_user)  # lazy refresh
+        await m.reply_text(
+            plansmod.format_plans_text(plans),
+            reply_markup=plansmod.buy_markup(),
+            disable_web_page_preview=True,
+            quote=True,
+        )
+
+    @app.on_message(filters.command("myplan") & filters.private)
+    async def on_myplan(_c: Client, m: Message):
+        state = await subs.get_state(m.from_user)
+        await m.reply_text(myplan_text(state), reply_markup=back_home_markup(), quote=True)
+
+    @app.on_message(filters.command("help") & filters.private)
+    async def on_help(_c: Client, m: Message):
+        await m.reply_text(HELP_TEXT, reply_markup=back_home_markup(),
+                           disable_web_page_preview=True, quote=True)
+
+    @app.on_message(filters.command("about") & filters.private)
+    async def on_about(_c: Client, m: Message):
+        await m.reply_text(ABOUT_TEXT, reply_markup=back_home_markup(),
+                           disable_web_page_preview=True, quote=True)
+
+    @app.on_message(filters.command("id"))
+    async def on_id(_c: Client, m: Message):
+        await m.reply_text(f"chat id: `{m.chat.id}`", quote=True)
+
+    # ---------------- admin commands ----------------
+
     @app.on_message(filters.command("stats") & filters.private)
     async def on_stats(_c: Client, m: Message):
-        if not m.from_user or m.from_user.id not in cfg.admins:
+        if not _is_admin(m.from_user):
             return
-        total = await db.count()
-        await m.reply_text(f"📊 **Total users:** {total}", quote=True)
+        c = await subs.analytics()
+        await m.reply_text(
+            f"📊 **Stats**\n\nTotal: {c['total']}\n🆓 Free: {c['free']}\n"
+            f"⭐ Plus: {c['plus']}\n🚀 Pro: {c['pro']}",
+            quote=True,
+        )
 
-    @app.on_message(filters.command("users") & filters.private)
-    async def on_users(_c: Client, m: Message):
-        if not m.from_user or m.from_user.id not in cfg.admins:
-            uid = m.from_user.id if m.from_user else "unknown"
-            await m.reply_text(
-                f"🚫 You are not an admin.\nYour ID: `{uid}`", quote=True
-            )
+    @app.on_message(filters.command("plans_stats") & filters.private)
+    async def on_plans_stats(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
             return
-        users = await db.all_users_detailed()
-        if not users:
-            await m.reply_text("No users yet.", quote=True)
+        c = await subs.analytics()
+        paid = c["plus"] + c["pro"]
+        revenue = c["plus"] * cfg.plus_price + c["pro"] * cfg.pro_price
+        await m.reply_text(
+            f"📈 **Subscription Analytics**\n\n"
+            f"Total users: {c['total']}\nPaid users: {paid}\n"
+            f"⭐ Plus: {c['plus']} (₹{c['plus'] * cfg.plus_price})\n"
+            f"🚀 Pro: {c['pro']} (₹{c['pro'] * cfg.pro_price})\n"
+            f"Est. monthly revenue: ₹{revenue}",
+            quote=True,
+        )
+
+    @app.on_message(filters.command("user") & filters.private)
+    async def on_user(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
             return
-        lines = []
-        for u in users:
-            uid = u.get("_id")
-            uname = u.get("username")
-            fname = u.get("first_name") or ""
-            handle = f"@{uname}" if uname else "(no username)"
-            lines.append(f"• `{uid}` — {handle} {fname}".strip())
-        text = "👥 **Users**\n\n" + "\n".join(lines)
-        # Telegram messages cap at 4096 chars; send as a file if too long.
-        if len(text) > 4000:
-            import io
-            buf = io.BytesIO("\n".join(lines).encode())
-            buf.name = "users.txt"
-            await m.reply_document(buf, caption=f"👥 {len(users)} users", quote=True)
-        else:
-            await m.reply_text(text, quote=True)
+        if len(m.command) < 2:
+            await m.reply_text("Usage: `/user USER_ID`", quote=True)
+            return
+        try:
+            uid = int(m.command[1])
+        except ValueError:
+            await m.reply_text("Invalid user id.", quote=True)
+            return
+        state = await subs.get_state(uid)
+        await m.reply_text(
+            f"👤 **User {uid}**\nPlan: {state.plan.name}\n"
+            f"Expiry: {_expiry_str(state.expires_at)}\n"
+            f"Today: {state.used_today}/{state.plan.daily_links}",
+            quote=True,
+        )
+
+    @app.on_message(filters.command("addplan") & filters.private)
+    async def on_addplan(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
+            return
+        if len(m.command) < 4 or m.command[2] not in ("plus", "pro"):
+            await m.reply_text("Usage: `/addplan USER_ID <plus|pro> DAYS`", quote=True)
+            return
+        try:
+            uid, plan_key, days = int(m.command[1]), m.command[2], int(m.command[3])
+        except ValueError:
+            await m.reply_text("Invalid arguments.", quote=True)
+            return
+        expires = await subs.set_plan(uid, plan_key, days)
+        await m.reply_text(
+            f"✅ Set user {uid} to {plan_key} for {days} days (until {_expiry_str(expires)}).",
+            quote=True,
+        )
+        try:
+            await app.send_message(uid, f"🎉 You've been granted **{plan_key.title()}** for {days} days!")
+        except Exception:
+            pass
+
+    @app.on_message(filters.command("removeplan") & filters.private)
+    async def on_removeplan(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
+            return
+        if len(m.command) < 2:
+            await m.reply_text("Usage: `/removeplan USER_ID`", quote=True)
+            return
+        try:
+            uid = int(m.command[1])
+        except ValueError:
+            await m.reply_text("Invalid user id.", quote=True)
+            return
+        await subs.remove_plan(uid)
+        await m.reply_text(f"✅ User {uid} reverted to Free.", quote=True)
+
+    @app.on_message(filters.command("extend") & filters.private)
+    async def on_extend(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
+            return
+        if len(m.command) < 3:
+            await m.reply_text("Usage: `/extend USER_ID DAYS`", quote=True)
+            return
+        try:
+            uid, days = int(m.command[1]), int(m.command[2])
+        except ValueError:
+            await m.reply_text("Invalid arguments.", quote=True)
+            return
+        expires = await subs.extend_plan(uid, days)
+        await m.reply_text(f"✅ Extended user {uid} until {_expiry_str(expires)}.", quote=True)
 
     @app.on_message(filters.command("broadcast") & filters.private)
     async def on_broadcast(_c: Client, m: Message):
-        if not m.from_user or m.from_user.id not in cfg.admins:
-            uid = m.from_user.id if m.from_user else "unknown"
-            await m.reply_text(
-                f"🚫 You are not an admin.\nYour ID: `{uid}`", quote=True
-            )
+        if not _is_admin(m.from_user):
             return
         if not m.reply_to_message:
-            await m.reply_text(
-                "Reply to a message with /broadcast to send it to all users.",
-                quote=True,
-            )
+            await m.reply_text("Reply to a message with /broadcast to send it to all users.", quote=True)
             return
-
         users = await db.all_users()
         status = await m.reply_text(f"📢 Broadcasting to {len(users)} users...", quote=True)
         sent = failed = 0
@@ -236,40 +345,107 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
             except Exception:
                 failed += 1
             await asyncio.sleep(0.05)
-        await status.edit_text(
-            f"📢 **Broadcast done.**\n✅ Sent: {sent}\n❌ Failed: {failed}"
-        )
+        await status.edit_text(f"📢 **Broadcast done.**\n✅ Sent: {sent}\n❌ Failed: {failed}")
 
-    @app.on_message(filters.command("help") & filters.private)
-    async def on_help(_c: Client, m: Message):
-        await m.reply_text(
-            HELP_TEXT, reply_markup=back_markup(), disable_web_page_preview=True, quote=True
-        )
+    # ---------------- callbacks ----------------
 
-    @app.on_message(filters.command("about") & filters.private)
-    async def on_about(_c: Client, m: Message):
-        await m.reply_text(
-            ABOUT_TEXT, reply_markup=back_markup(), disable_web_page_preview=True, quote=True
+    async def _send_upi(cq: CallbackQuery, plan_key: str):
+        plan = plans[plan_key]
+        if not payments.enabled:
+            await cq.message.reply_text("Payments are not enabled yet. Please contact support.")
+            return
+        res = await payments.start_purchase(cq.from_user, plan_key)
+        if res.blocked:
+            await cq.message.reply_text(
+                "⚠️ You already have a payment request awaiting verification.\n"
+                "Please wait for an admin to review your current request before creating a new one."
+            )
+            return
+        await cq.message.reply_text(
+            f"💳 **Pay ₹{res.amount} for {plan.name}**\n\n"
+            f"Reference: `{res.reference}`\n\n"
+            f"Tap to pay via any UPI app:\n{res.upi_link}\n\n"
+            "After paying, send the **last 4 digits of your UTR** here to submit for verification.",
+            disable_web_page_preview=True,
         )
 
     @app.on_callback_query()
     async def on_callback(_c: Client, cq: CallbackQuery):
-        data = cq.data
-        if data == "help":
+        data = cq.data or ""
+
+        if data == "menu_home":
+            state = await subs.get_state(cq.from_user)
             await cq.message.edit_text(
-                HELP_TEXT, reply_markup=back_markup(), disable_web_page_preview=True
+                start_text(cq.from_user.first_name if cq.from_user else "there", state),
+                reply_markup=main_menu_markup(), disable_web_page_preview=True,
             )
-        elif data == "about":
+        elif data == "menu_generate":
+            await cq.answer("Send me a video file to get a streaming link.", show_alert=True)
+        elif data in ("menu_plans", "plans"):
             await cq.message.edit_text(
-                ABOUT_TEXT, reply_markup=back_markup(), disable_web_page_preview=True
+                plansmod.format_plans_text(plans),
+                reply_markup=plansmod.buy_markup(), disable_web_page_preview=True,
             )
-        elif data == "back":
-            name = cq.from_user.mention if cq.from_user else "there"
-            await cq.message.edit_text(
-                start_text(name),
-                reply_markup=start_markup(),
-                disable_web_page_preview=True,
-            )
+        elif data == "menu_myplan":
+            state = await subs.get_state(cq.from_user)
+            await cq.message.edit_text(myplan_text(state), reply_markup=back_home_markup())
+        elif data == "help":
+            await cq.message.edit_text(HELP_TEXT, reply_markup=back_home_markup(),
+                                       disable_web_page_preview=True)
+        elif data in ("buy_plus", "buy_pro"):
+            plan_key = "plus" if data == "buy_plus" else "pro"
+            plan = plans[plan_key]
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Pay Now", callback_data=f"pay_{plan_key}")],
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_plans")],
+            ])
+            await cq.message.edit_text(plansmod.purchase_text(plan), reply_markup=markup)
+        elif data in ("pay_plus", "pay_pro"):
+            await cq.answer()
+            await _send_upi(cq, "plus" if data == "pay_plus" else "pro")
+        elif data.startswith("approve_") or data.startswith("reject_"):
+            if not _is_admin(cq.from_user):
+                await cq.answer("Not authorized.", show_alert=True)
+                return
+            action, ref = data.split("_", 1)
+            if action == "approve":
+                result = await payments.approve(ref, cq.from_user.id)
+                if not result:
+                    await cq.answer("Already processed.", show_alert=True)
+                    return
+                plan = plans[result["plan"]]
+                await cq.message.edit_text(
+                    cq.message.text + f"\n\n✅ Approved by {cq.from_user.first_name}"
+                )
+                try:
+                    await app.send_message(
+                        result["user_id"],
+                        f"🎉 **Payment Verified Successfully!**\n\n"
+                        f"{plan.emoji} **{plan.name} Plan Activated**\n"
+                        f"Valid Until: {_expiry_str(result['expires'])}\n\n"
+                        f"Benefits:\n{plansmod.benefits_text(plan)}\n\n"
+                        "Thank you for supporting Alaska ❤️",
+                    )
+                except Exception:
+                    log.exception("notify approve failed")
+                await cq.answer("Approved")
+            else:
+                result = await payments.reject(ref, cq.from_user.id)
+                if not result:
+                    await cq.answer("Already processed.", show_alert=True)
+                    return
+                await cq.message.edit_text(
+                    cq.message.text + f"\n\n❌ Rejected by {cq.from_user.first_name}"
+                )
+                try:
+                    await app.send_message(
+                        result["user_id"],
+                        "❌ Payment verification failed.\nPlease check your payment "
+                        "details and try again. If you believe this is a mistake, contact support.",
+                    )
+                except Exception:
+                    log.exception("notify reject failed")
+                await cq.answer("Rejected")
         elif data == "close":
             try:
                 await cq.message.delete()
@@ -278,10 +454,8 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
         elif data.startswith("checksub_"):
             file_msg_id = int(data.split("_", 1)[1])
             if not await is_subscribed(_c, cfg, cq.from_user.id):
-                await cq.answer(
-                    "❌ You haven't joined yet. Please join the channel first.",
-                    show_alert=True,
-                )
+                await cq.answer("❌ You haven't joined yet. Please join the channel first.",
+                                show_alert=True)
                 return
             await cq.answer("✅ Verified!")
             try:
@@ -293,15 +467,41 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
             except Exception:
                 pass
             if file_message and not file_message.empty:
-                await send_stream_link(_c, cfg, file_message, file_message)
+                await _process_file(_c, file_message, cq.from_user, file_message)
             else:
                 await _c.send_message(cq.from_user.id, "Please send the file again.")
             return
         await cq.answer()
 
-    @app.on_message(filters.command("id"))
-    async def on_id(_c: Client, m: Message):
-        await m.reply_text(f"chat id: `{m.chat.id}`", quote=True)
+    # ---------------- file handling with enforcement ----------------
+
+    async def _process_file(client, file_message, user, reply_to):
+        media = (file_message.document or file_message.video
+                 or file_message.audio or file_message.animation)
+        if media is None:
+            return
+        decision = await subs.can_generate(user, media.file_size)
+        plan = decision.plan
+        if not decision.ok and decision.reason == "file_too_big":
+            await reply_to.reply_text(
+                "⚠️ **File size exceeds your current plan limit.**\n\n"
+                f"Current Plan: {plan.name}\n"
+                f"Maximum Allowed: {human_size(plan.max_file_size)}\n\n"
+                "Upgrade for larger files.",
+                reply_markup=plansmod.upgrade_markup(), quote=True,
+            )
+            return
+        if not decision.ok and decision.reason == "daily_limit":
+            await reply_to.reply_text(
+                "⚠️ **Daily limit reached.**\n\n"
+                f"You have used all {plan.daily_links} stream links available in your "
+                f"{plan.name} plan. Upgrade to continue generating links.",
+                reply_markup=plansmod.upgrade_markup(), quote=True,
+            )
+            return
+        ok = await send_stream_link(client, cfg, subs, file_message, reply_to, plan)
+        if ok:
+            await subs.record_link(user.id)
 
     @app.on_message(
         filters.private
@@ -311,21 +511,40 @@ def register_handlers(app: Client, cfg: Config, db) -> None:
         media = m.document or m.video or m.audio or m.animation
         if media is None:
             return
-        if m.from_user:
-            await db.add_user(
-                m.from_user.id, m.from_user.username, m.from_user.first_name
-            )
-
-        # Force-subscribe gate.
+        await subs.get_state(m.from_user)  # ensure user + lazy refresh
         user_id = m.from_user.id if m.from_user else 0
         if not await is_subscribed(client, cfg, user_id):
             await m.reply_text(
                 "🚫 **Access Denied**\n\n"
                 "Please join our channel to use this bot.\n"
                 "After joining, tap **🔄 I've Joined** and I'll send your link.",
-                reply_markup=fsub_markup(cfg, m.id),
-                quote=True,
+                reply_markup=fsub_markup(cfg, m.id), quote=True,
             )
             return
+        await _process_file(client, m, m.from_user, m)
 
-        await send_stream_link(client, cfg, m, m)
+    # ---------------- UTR capture (must be registered last) ----------------
+
+    @app.on_message(filters.private & filters.text & ~filters.via_bot)
+    async def on_text(client: Client, m: Message):
+        if not m.text or m.text.startswith("/"):
+            return
+        pending = await db.get_pending_payment(m.from_user.id)
+        if not pending or pending["status"] != "awaiting_utr":
+            return
+        utr = m.text.strip()
+        payment = await payments.submit_utr(m.from_user, utr)
+        if payment is None:
+            await m.reply_text("Please send exactly the **last 4 digits** of your UTR (e.g. `6451`).",
+                               quote=True)
+            return
+        await payments.post_to_admins(payment)
+        await m.reply_text(
+            "⏳ **Payment request submitted.**\n\n"
+            f"Plan: {payment['plan'].title()}\n"
+            f"Reference: `{payment['_id']}`\n"
+            f"UTR: ****{payment['utr_last4']}\n\n"
+            "Please wait while an admin verifies your payment. "
+            "Verification usually takes a few minutes.",
+            quote=True,
+        )
