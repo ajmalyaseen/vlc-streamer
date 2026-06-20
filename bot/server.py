@@ -271,28 +271,52 @@ async def watch_handler(request: web.Request) -> web.Response:
 
 
 async def pay_handler(request: web.Request) -> web.Response:
-    """Redirect to a UPI deep link so a UPI app opens with details pre-filled.
-    (Telegram won't allow upi:// directly in a button, so the button points here.)"""
+    """Show a UPI-app chooser. Each button opens that app's deep link with the
+    payee/amount/note pre-filled. (Telegram won't allow upi:// in a button, so
+    the bot button points here.)"""
     pa = request.query.get("pa", "")
     pn = request.query.get("pn", "Payment")
     am = request.query.get("am", "")
     tn = request.query.get("tn", "")
-    upi = "upi://pay?" + urlencode(
-        {"pa": pa, "pn": pn, "am": am, "cu": "INR", "tn": tn}, quote_via=quote
+    q = urlencode({"pa": pa, "pn": pn, "am": am, "cu": "INR", "tn": tn}, quote_via=quote)
+
+    # App-specific UPI deep-link schemes (same query params).
+    links = {
+        "gpay": "tez://upi/pay?" + q,
+        "phonepe": "phonepe://pay?" + q,
+        "paytm": "paytmmp://pay?" + q,
+        "upi": "upi://pay?" + q,
+    }
+
+    def btn(href, bg, fg, label):
+        return (
+            f"<a class='btn' style='background:{bg};color:{fg}' "
+            f"href='{escape(href, quote=True)}'>{label}</a>"
+        )
+
+    buttons = (
+        btn(links["gpay"], "#ffffff", "#3c4043", "🟢🔵🔴🟡 &nbsp; Google Pay")
+        + btn(links["phonepe"], "#5f259f", "#ffffff", "🟣 &nbsp; PhonePe")
+        + btn(links["paytm"], "#00baf2", "#ffffff", "🔵 &nbsp; Paytm")
+        + btn(links["upi"], "#ff8800", "#111111", "💳 &nbsp; Any UPI App")
     )
-    upi_attr = escape(upi, quote=True)
     html = (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<title>Open UPI</title>"
+        "<title>Choose UPI App</title>"
         "<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;"
-        "color:#eaeaea;text-align:center;padding-top:22vh}a.btn{display:inline-block;margin-top:16px;"
-        "padding:14px 22px;background:#ff8800;color:#111;border-radius:10px;text-decoration:none;"
-        "font-weight:700}p{color:#9aa0aa}</style></head><body>"
-        f"<h2>Opening your UPI app…</h2><p>Amount ₹{escape(am)} · {escape(tn)}</p>"
-        f"<a class='btn' href='{upi_attr}'>Tap to pay</a>"
-        f"<script>location.href=\"{upi}\";</script>"
-        "</body></html>"
+        "color:#eaeaea;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}"
+        ".card{background:#171a21;padding:26px 22px;border-radius:16px;width:90%;max-width:380px;"
+        "text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.4)}"
+        ".btn{display:block;margin:10px 0;padding:14px;border-radius:10px;text-decoration:none;"
+        "font-weight:700}h2{margin:0 0 4px}p{color:#9aa0aa;margin:0 0 16px;font-size:14px}"
+        ".hint{color:#7d828c;font-size:12px;margin-top:16px}</style></head><body>"
+        "<div class='card'>"
+        f"<h2>Pay ₹{escape(am)}</h2><p>To {escape(pa)} · Ref {escape(tn)}</p>"
+        f"{buttons}"
+        "<p class='hint'>Pick your app — amount &amp; note are pre-filled. "
+        "After paying, send the last 4 digits of your UTR to the bot.</p>"
+        "</div></body></html>"
     )
     return web.Response(text=html, content_type="text/html")
 
