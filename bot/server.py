@@ -95,15 +95,19 @@ def _extract_media(message: Message):
     return message.document or message.video or message.audio or message.animation
 
 
-def _select_client_index(app: web.Application, chat_id: int) -> int:
-    """Pick the least-busy eligible client. Workers can only read LOG_CHANNEL
-    files, so they're only eligible when the file lives in the log channel."""
+def _select_client_index(app: web.Application, chat_id: int, msg_id: int) -> int:
+    """Pick a client for this file. Workers can only read LOG_CHANNEL files, so
+    they're only eligible when the file lives in the log channel.
+
+    Sticky-per-file: the same file (msg_id) always maps to the same bot. This
+    keeps that bot's warm media session reused across ALL of a file's Range
+    requests (including the parallel connections VLC opens on a seek), so seeks
+    don't pay a fresh DC handshake when they'd otherwise land on a cold bot.
+    Different files still spread across bots, preserving concurrency."""
     cfg: Config = app["config"]
     clients = app["clients"]
-    active = app["active"]
     if len(clients) > 1 and cfg.log_channel and chat_id == cfg.log_channel:
-        # least active streams; ties broken by lowest index
-        return min(range(len(clients)), key=lambda i: active[i])
+        return msg_id % len(clients)
     return 0  # only the main bot can read non-log-channel files
 
 
@@ -170,7 +174,7 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
     # parallel connections for one file spread across bots instead of piling
     # onto a single one. Increment the counter NOW (at selection) so concurrent
     # requests see updated load and don't all pick the same client.
-    ci = _select_client_index(request.app, chat_id)
+    ci = _select_client_index(request.app, chat_id, msg_id)
     active = request.app["active"]
     active[ci] += 1
     try:
