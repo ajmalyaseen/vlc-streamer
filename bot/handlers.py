@@ -312,23 +312,43 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
     async def on_addplan(_c: Client, m: Message):
         if not _is_admin(m.from_user):
             return
-        if len(m.command) < 4 or m.command[2] not in ("plus", "pro"):
-            await m.reply_text("Usage: `/addplan USER_ID <plus|pro> DAYS`", quote=True)
+        args = m.command[1:]
+        # Accept user id + (plan and days in ANY order):
+        #   /addplan USER_ID plus 30   OR   /addplan USER_ID 30 plus
+        if len(args) < 3:
+            await m.reply_text(
+                "Usage: `/addplan USER_ID PLAN DAYS`\n"
+                "Example: `/addplan 1853251761 plus 30`\n"
+                "(plan and days can be in any order)",
+                quote=True,
+            )
             return
         try:
-            uid, plan_key, days = int(m.command[1]), m.command[2], int(m.command[3])
+            uid = int(args[0])
         except ValueError:
-            await m.reply_text("Invalid arguments.", quote=True)
+            await m.reply_text("Invalid user id. It must be a number.", quote=True)
+            return
+        rest = [a.lower() for a in args[1:]]
+        plan_key = next((a for a in rest if a in ("plus", "pro")), None)
+        days = next((int(a) for a in rest if a.isdigit()), None)
+        if plan_key is None:
+            await m.reply_text("Plan must be `plus` or `pro`.", quote=True)
+            return
+        if days is None or days <= 0:
+            await m.reply_text("Days must be a positive number, e.g. `30`.", quote=True)
             return
         expires = await subs.set_plan(uid, plan_key, days)
         await m.reply_text(
-            f"✅ Set user {uid} to {plan_key} for {days} days (until {_expiry_str(expires)}).",
+            f"✅ Set user `{uid}` to **{plan_key}** for **{days} days** "
+            f"(until {_expiry_str(expires)}).",
             quote=True,
         )
         try:
-            await app.send_message(uid, f"🎉 You've been granted **{plan_key.title()}** for {days} days!")
+            await app.send_message(
+                uid, f"🎉 You've been granted **{plan_key.title()}** for {days} days!"
+            )
         except Exception:
-            pass
+            log.info("Could not DM user %s about granted plan (they may not have started the bot)", uid)
 
     @app.on_message(filters.command("removeplan") & filters.private)
     async def on_removeplan(_c: Client, m: Message):
