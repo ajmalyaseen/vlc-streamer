@@ -1,0 +1,5 @@
+# Caddy auto-provisions a free Let's Encrypt TLS cert for $DOMAIN and
+# reverse-proxies all traffic to the bot's HTTP server on port 8080.
+{$DOMAIN} {
+	reverse_proxy bot:8080
+}

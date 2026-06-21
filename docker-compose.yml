@@ -1,0 +1,26 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    expose:
+      - "8080"            # internal only; Caddy talks to this
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - bot
+    environment:
+      - DOMAIN=${DOMAIN}  # read from .env; used by Caddyfile for auto-HTTPS
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
