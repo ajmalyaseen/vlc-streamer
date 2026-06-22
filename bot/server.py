@@ -12,7 +12,7 @@ from pyrogram.file_id import FileId
 from pyrogram.types import Message
 
 from .config import Config
-from .streamer import stream_to_response
+from .streamer import stream_to_response, get_media_session
 from .utils import verify_token
 
 log = logging.getLogger("server")
@@ -107,19 +107,35 @@ def _extract_media(message: Message):
 
 
 def _select_client_index(app: web.Application, chat_id: int, msg_id: int) -> int:
-    """Pick a client for this file. Workers can only read LOG_CHANNEL files, so
-    they're only eligible when the file lives in the log channel.
+    """Pick a client for this request. Workers can only read LOG_CHANNEL files,
+    so they're only eligible when the file lives in the log channel.
 
-    Sticky-per-file: the same file (msg_id) always maps to the same bot. This
-    keeps that bot's warm media session reused across ALL of a file's Range
-    requests (including the parallel connections VLC opens on a seek), so seeks
-    don't pay a fresh DC handshake when they'd otherwise land on a cold bot.
-    Different files still spread across bots, preserving concurrency."""
+    Least-busy routing: pick the client with the fewest active streams right now.
+    This spreads the multiple parallel connections VLC opens on a seek across all
+    bots (instead of piling them on one), so seeks resolve concurrently. All bots
+    are pre-warmed at startup, so a spread connection never pays a cold handshake.
+    Ties are broken by msg_id so a quiet file still has a stable-ish home bot."""
     cfg: Config = app["config"]
     clients = app["clients"]
     if len(clients) > 1 and cfg.log_channel and chat_id == cfg.log_channel:
-        return msg_id % len(clients)
+        active = app["active"]
+        # min active load; deterministic tiebreak keeps it stable under no load
+        return min(range(len(clients)), key=lambda i: (active[i], (i - msg_id) % len(clients)))
     return 0  # only the main bot can read non-log-channel files
+
+
+async def _prewarm_all_clients(app: web.Application, file_id) -> None:
+    """Warm every client's media session for this file's DC, once.
+
+    Triggered (fire-and-forget) on the first stream request. get_media_session
+    only needs file_id.dc_id — which is the same for all LOG_CHANNEL files — so
+    one file warms every bot. After this, least-busy routing can spread a seek's
+    parallel connections across bots without any of them paying a cold handshake."""
+    for client in app["clients"]:
+        try:
+            await get_media_session(client, file_id)
+        except Exception:
+            log.warning("prewarm failed for a client (non-fatal)", exc_info=True)
 
 
 async def _get_entry(app: web.Application, ci: int, chat_id: int, msg_id: int):
@@ -196,6 +212,13 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
             return web.Response(status=404, text="File not found")
         if entry is None:
             return web.Response(status=404, text="File not found")
+
+        # On the very first stream request, warm every bot's media session for
+        # this DC in the background, so seek connections that spread to other
+        # bots (via least-busy routing) don't pay a cold ~2s handshake.
+        if len(request.app["clients"]) > 1 and not request.app.get("prewarmed"):
+            request.app["prewarmed"] = True
+            asyncio.ensure_future(_prewarm_all_clients(request.app, entry["file_id"]))
 
         file_size = entry["size"]
         mime = entry["mime"]
