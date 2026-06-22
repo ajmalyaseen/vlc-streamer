@@ -47,15 +47,19 @@ WATCH_PAGE = """<!doctype html>
     <h2>▶ Open in VLC</h2>
     <p class="fn">{name}</p>
     <a id="vlc" class="btn primary" href="#">Open in VLC</a>
+    <a id="pcvlc" class="btn primary" href="{playlist}" style="display:none">🖥 Open in PC VLC</a>
     <a id="direct" class="btn secondary" href="{stream}">Copy / Direct link</a>
     <p class="hint">If VLC doesn't open automatically, tap "Open in VLC".
-       On desktop, copy the direct link and use VLC &rarr; Open Network Stream.</p>
+       On desktop, tap "Open in PC VLC" to launch the VLC app, or copy the direct
+       link and use VLC &rarr; Open Network Stream.</p>
   </div>
 <script>
   var stream = "{stream_js}";
+  var playlist = "{playlist}";
   var ua = navigator.userAgent || "";
   var isiOS = /iPad|iPhone|iPod/.test(ua);
   var isAndroid = /Android/.test(ua);
+  var isMobile = isiOS || isAndroid;
   var PLAY = "https://play.google.com/store/apps/details?id=org.videolan.vlc";
   var APPSTORE = "https://apps.apple.com/app/vlc-media-player/id650377962";
   var vlcLink;
@@ -70,6 +74,13 @@ WATCH_PAGE = """<!doctype html>
     vlcLink = stream;
   }}
   document.getElementById("vlc").href = vlcLink;
+
+  // On desktop, show the .m3u "Open in PC VLC" button (VLC is the default app
+  // for .m3u) and hide the mobile deep-link button which can't reach desktop VLC.
+  if (!isMobile) {{
+    document.getElementById("pcvlc").style.display = "block";
+    document.getElementById("vlc").style.display = "none";
+  }}
 
   if (isAndroid) {{
     window.location.href = vlcLink;
@@ -263,6 +274,46 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         active[ci] -= 1
 
 
+async def playlist_handler(request: web.Request) -> web.Response:
+    """Serve a tiny .m3u playlist pointing at the stream URL.
+
+    On desktop, browsers have no vlc:// scheme, but VLC registers itself as the
+    default handler for .m3u files. So downloading/opening this playlist launches
+    VLC and starts streaming automatically — the reliable "Open in PC VLC" path."""
+    cfg: Config = request.app["config"]
+
+    try:
+        chat_id = int(request.match_info["chat_id"])
+        msg_id = int(request.match_info["msg_id"])
+    except ValueError:
+        return web.Response(status=400, text="Bad chat or message id")
+
+    token = request.query.get("hash", "")
+    exp = int(request.query.get("exp", "0") or "0")
+    if not verify_token(chat_id, msg_id, token, cfg.hash_secret, exp):
+        return web.Response(status=403, text="Invalid or missing token")
+    if exp and exp < int(time.time()):
+        return web.Response(status=410, text="This link has expired")
+
+    name = request.match_info["name"]
+    uid = request.query.get("uid", "")
+    suffix = f"&exp={exp}" if exp else ""
+    if uid:
+        suffix += f"&uid={quote(uid)}"
+    stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}{suffix}"
+
+    body = f"#EXTM3U\n#EXTINF:-1,{name}\n{stream_url}\n"
+    # Strip characters that would break the Content-Disposition filename.
+    safe_name = re.sub(r'[\\/:*?"<>|\r\n]+', "_", name) or f"file_{msg_id}"
+    if not safe_name.lower().endswith(".m3u"):
+        safe_name += ".m3u"
+    return web.Response(
+        text=body,
+        content_type="audio/x-mpegurl",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
+
 async def watch_handler(request: web.Request) -> web.Response:
     """Serve a small page that deep-links into VLC, with a direct-link fallback."""
     cfg: Config = request.app["config"]
@@ -284,6 +335,7 @@ async def watch_handler(request: web.Request) -> web.Response:
     if uid:
         suffix += f"&uid={quote(uid)}"
     stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}{suffix}"
+    playlist_url = f"{cfg.base_url}/play/{chat_id}/{msg_id}/{quote(name)}?hash={token}{suffix}"
     # Two contexts: the <a href> needs HTML-escaped "&amp;" (browser decodes it back),
     # but the JS string variable needs the RAW url — JS does not decode HTML entities,
     # so "&amp;" there would literally reach VLC and break the query string (exp lost).
@@ -291,6 +343,7 @@ async def watch_handler(request: web.Request) -> web.Response:
         name=escape(name),
         stream=escape(stream_url, quote=True),
         stream_js=stream_url,
+        playlist=escape(playlist_url, quote=True),
     )
     return web.Response(text=html, content_type="text/html")
 
@@ -492,6 +545,7 @@ def make_app(bot: Client, cfg: Config, clients=None, payments=None, monitor=None
     # add_get also registers HEAD automatically; the handler checks request.method.
     app.router.add_get("/stream/{chat_id}/{msg_id}/{name}", stream_handler)
     app.router.add_get("/watch/{chat_id}/{msg_id}/{name}", watch_handler)
+    app.router.add_get("/play/{chat_id}/{msg_id}/{name}", playlist_handler)
     app.router.add_get("/pay", pay_handler)
     app.router.add_get("/checkout/{reference}", checkout_handler)
     app.router.add_post("/api/create-order", create_order_handler)

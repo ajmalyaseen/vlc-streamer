@@ -76,6 +76,9 @@ class MemoryUserDB:
     async def create_payment(self, doc: dict) -> None:
         self._payments[doc["_id"]] = dict(doc)
 
+    async def all_payments(self):
+        return [dict(p) for p in self._payments.values()]
+
     async def get_pending_payment(self, user_id):
         for p in self._payments.values():
             if p["user_id"] == user_id and p["status"] in ("awaiting_utr", "pending"):
@@ -145,6 +148,9 @@ class MongoUserDB:
 
     async def create_payment(self, doc: dict) -> None:
         await self._pay.insert_one(doc)
+
+    async def all_payments(self):
+        return [doc async for doc in self._pay.find({})]
 
     async def get_pending_payment(self, user_id):
         return await self._pay.find_one(

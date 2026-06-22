@@ -16,6 +16,7 @@ from pyrogram.types import (
 from . import plans as plansmod
 from .config import Config
 from .utils import human_size, make_token
+from .backup import run_backup
 
 log = logging.getLogger("handlers")
 
@@ -288,6 +289,20 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
             f"Est. monthly revenue: ₹{revenue}",
             quote=True,
         )
+
+    @app.on_message(filters.command("backup") & filters.private)
+    async def on_backup(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
+            return
+        if not cfg.log_channel:
+            await m.reply_text("⚠️ LOG_CHANNEL is not configured; cannot back up.", quote=True)
+            return
+        status = await m.reply_text("🗄 Creating database backup...", quote=True)
+        ok = await run_backup(_c, cfg, db)
+        if ok:
+            await status.edit_text("✅ Backup sent to the log channel.")
+        else:
+            await status.edit_text("❌ Backup failed. Check the logs.")
 
     @app.on_message(filters.command("streamusers") & filters.private)
     async def on_streamusers(_c: Client, m: Message):

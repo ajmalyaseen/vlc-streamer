@@ -31,6 +31,7 @@ from .payments import PaymentService
 from .plans import build_plans
 from .server import make_app
 from .subscription import SubscriptionService
+from .backup import weekly_backup_loop
 
 
 BOT_COMMANDS = [
@@ -148,6 +149,9 @@ async def run() -> None:
     except Exception:
         log.exception("Failed to set bot commands (non-fatal)")
 
+    # Weekly database backup to LOG_CHANNEL (every Sunday 00:00 UTC).
+    backup_task = asyncio.create_task(weekly_backup_loop(bot, cfg, db))
+
     stop_event = asyncio.Event()
 
     def _on_signal():
@@ -166,6 +170,11 @@ async def run() -> None:
         await stop_event.wait()
     finally:
         log.info("Stopping HTTP server and bot")
+        backup_task.cancel()
+        try:
+            await backup_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await runner.cleanup()
         for client in clients:
             try:
