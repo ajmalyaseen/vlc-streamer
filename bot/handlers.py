@@ -280,19 +280,18 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
     async def on_start(_c: Client, m: Message):
         await subs.get_state(m.from_user)  # ensure user + lazy refresh
         name = m.from_user.first_name if m.from_user else "there"
-        caption = welcome_text(name)
-        markup = welcome_markup()
         image = _resolve_start_image(cfg)
+        # Send the banner as its own message (a photo caption won't render the
+        # blockquote side-bar), then the welcome + menu as a TEXT message so the
+        # blockquote styling shows correctly here and on every navigation.
         if image:
             try:
-                await m.reply_photo(image, caption=caption, reply_markup=markup,
-                                    parse_mode=HTML, quote=True)
-                return
+                await m.reply_photo(image, quote=True)
             except Exception:
-                log.exception("start image send failed; falling back to text")
+                log.exception("start image send failed; continuing with text")
         await m.reply_text(
-            caption,
-            reply_markup=markup,
+            welcome_text(name),
+            reply_markup=welcome_markup(),
             parse_mode=HTML,
             disable_web_page_preview=True,
             quote=True,
