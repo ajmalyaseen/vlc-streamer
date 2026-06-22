@@ -2,7 +2,6 @@ import asyncio
 import datetime as dt
 import html
 import logging
-import os
 from urllib.parse import quote
 
 from pyrogram import Client, filters
@@ -64,7 +63,7 @@ def welcome_text(name: str) -> str:
     safe = html.escape(name or "there")
     return (
         f"👋 <b>Hey {safe},</b>\n\n"
-        "Your instant Telegram-to-VLC bridge. 🌉\n"
+        "Your instant Telegram-to-VLC bridge.\n"
         "Send any <b>MP4</b> or <b>MKV</b> video to this chat, and I'll "
         "generate a high-speed streaming link right away.\n\n"
         f"{_bq('<i>💡 Need assistance? Tap Help in the menu.</i>')}"
@@ -233,23 +232,6 @@ async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> b
     return True
 
 
-# Local fallback locations for the /start banner when START_IMAGE isn't set.
-_START_IMAGE_CANDIDATES = (
-    os.path.join(os.path.dirname(__file__), "assets", "start.jpg"),
-    os.path.join(os.path.dirname(__file__), "assets", "start.png"),
-)
-
-
-def _resolve_start_image(cfg: Config):
-    """Return a URL or local path for the /start image, or None to use text."""
-    if cfg.start_image:
-        return cfg.start_image  # explicit URL or file path from .env
-    for path in _START_IMAGE_CANDIDATES:
-        if os.path.isfile(path):
-            return path
-    return None
-
-
 def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monitor=None) -> None:
 
     def _is_admin(user) -> bool:
@@ -280,19 +262,9 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
     async def on_start(_c: Client, m: Message):
         await subs.get_state(m.from_user)  # ensure user + lazy refresh
         name = m.from_user.first_name if m.from_user else "there"
-        caption = welcome_text(name)
-        markup = welcome_markup()
-        image = _resolve_start_image(cfg)
-        if image:
-            try:
-                await m.reply_photo(image, caption=caption, reply_markup=markup,
-                                    parse_mode=HTML, quote=True)
-                return
-            except Exception:
-                log.exception("start image send failed; falling back to text")
         await m.reply_text(
-            caption,
-            reply_markup=markup,
+            welcome_text(name),
+            reply_markup=welcome_markup(),
             parse_mode=HTML,
             disable_web_page_preview=True,
             quote=True,
