@@ -49,7 +49,7 @@ HELP_TEXT = (
 )
 
 ABOUT_TEXT = (
-    "<b>📕 BOT INFO</b>\n\n"
+    "<b>ℹ️ BOT INFO</b>\n\n"
     f"{SNOW} <b>Bot Name</b> : Alaska Stream\n"
     f"{SNOW} <b>Framework</b> : Pyrogram\n"
     f"{SNOW} <b>Language</b> : Python\n"
@@ -80,7 +80,7 @@ def welcome_markup() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK),
-                InlineKeyboardButton("📕 About", callback_data="about"),
+                InlineKeyboardButton("ℹ️ About", callback_data="about"),
             ],
             [InlineKeyboardButton("🔐 Close", callback_data="close")],
         ]
