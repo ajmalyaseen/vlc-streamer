@@ -193,8 +193,9 @@ async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> b
     token = make_token(chat_id, msg_id, cfg.hash_secret, exp)
     file_name = getattr(media, "file_name", None) or f"file_{msg_id}.mp4"
     q = quote(file_name)
-    url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{q}?hash={token}&exp={exp}"
-    watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{q}?hash={token}&exp={exp}"
+    uid = getattr(getattr(file_message, "from_user", None), "id", 0) or 0
+    url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{q}?hash={token}&exp={exp}&uid={uid}"
+    watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{q}?hash={token}&exp={exp}&uid={uid}"
 
     await reply_to.reply_text(
         f"**File:** `{file_name}`\n"
@@ -212,7 +213,7 @@ async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> b
     return True
 
 
-def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> None:
+def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monitor=None) -> None:
 
     def _is_admin(user) -> bool:
         return bool(user) and user.id in cfg.admins
@@ -286,6 +287,32 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
             f"🚀 Pro: {c['pro']} (₹{c['pro'] * cfg.pro_price})\n"
             f"Est. monthly revenue: ₹{revenue}",
             quote=True,
+        )
+
+    @app.on_message(filters.command("streamusers") & filters.private)
+    async def on_streamusers(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
+            return
+        if monitor is None:
+            await m.reply_text("Stream monitor not available.", quote=True)
+            return
+        watching = monitor.current()
+        if not watching:
+            await m.reply_text("📺 No one is streaming right now.", quote=True)
+            return
+        lines = []
+        for w in watching:
+            uid = w.get("uid")
+            name, uname = "—", ""
+            if uid:
+                rec = await db.get_user(uid) or {}
+                name = rec.get("first_name") or "—"
+                uname = f"@{rec['username']}" if rec.get("username") else ""
+            uid_str = f"`{uid}`" if uid else "—"
+            lines.append(f"• {name} {uname} ({uid_str})\n   🎬 {w.get('file_name')}")
+        await m.reply_text(
+            f"📺 **Now Streaming: {len(watching)}**\n\n" + "\n".join(lines),
+            quote=True, disable_web_page_preview=True,
         )
 
     @app.on_message(filters.command("users") & filters.private)

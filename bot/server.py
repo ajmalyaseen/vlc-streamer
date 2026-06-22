@@ -192,6 +192,17 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         client = request.app["clients"][ci]
         file_id = entry["file_id"]
 
+        # Record who's watching (admin /streamusers view). Side-effect-free: a
+        # dict write only, no influence on the streaming path below.
+        monitor = request.app.get("monitor")
+        if monitor is not None:
+            uid = request.query.get("uid")
+            try:
+                uid = int(uid) if uid else None
+            except ValueError:
+                uid = None
+            monitor.touch(uid, chat_id, msg_id, file_name)
+
         # ---- Range handling ----
         start, end, status = 0, file_size - 1, 200
         range_header = request.headers.get("Range")
@@ -268,7 +279,10 @@ async def watch_handler(request: web.Request) -> web.Response:
         return web.Response(status=403, text="Invalid or missing token")
 
     name = request.match_info["name"]
+    uid = request.query.get("uid", "")
     suffix = f"&exp={exp}" if exp else ""
+    if uid:
+        suffix += f"&uid={quote(uid)}"
     stream_url = f"{cfg.base_url}/stream/{chat_id}/{msg_id}/{quote(name)}?hash={token}{suffix}"
     # Two contexts: the <a href> needs HTML-escaped "&amp;" (browser decodes it back),
     # but the JS string variable needs the RAW url — JS does not decode HTML entities,
@@ -463,13 +477,14 @@ async def healthz(_request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-def make_app(bot: Client, cfg: Config, clients=None, payments=None) -> web.Application:
+def make_app(bot: Client, cfg: Config, clients=None, payments=None, monitor=None) -> web.Application:
     clients = clients or [bot]
     app = web.Application(client_max_size=1024 * 16)
     app["bot"] = bot
     app["config"] = cfg
     app["clients"] = clients
     app["payments"] = payments
+    app["monitor"] = monitor
     app["active"] = [0] * len(clients)        # active streams per client (load monitor)
     app["meta_cache"] = {}                      # (chat,msg) -> entry with TTL
     app.router.add_get("/", index)
