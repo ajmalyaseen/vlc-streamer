@@ -11,6 +11,7 @@ Based on the well-known TG-FileStreamBot ByteStreamer pattern.
 import asyncio
 import logging
 import math
+import time
 
 from pyrogram import Client, raw
 from pyrogram.errors import AuthBytesInvalid, FloodWait
@@ -102,14 +103,28 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
     last_part_cut = (end % CHUNK_SIZE) + 1
     part_count = math.ceil((end + 1) / CHUNK_SIZE) - math.floor(offset / CHUNK_SIZE)
 
+    # Telegram fetch stats for this request (measures the GetFile speed only,
+    # i.e. how fast the server pulls bytes FROM Telegram, excluding the time
+    # spent writing to the viewer's socket).
+    stats = {"fetch_time": 0.0, "fetch_bytes": 0, "first_latency": None, "calls": 0}
+
     async def _fetch_chunk(off: int):
         # Obey short Telegram GetFile rate-limits (FloodWait) instead of dropping
         # the connection — turns heavy-load floods into a brief pause, not a failure.
         while True:
             try:
-                return await media_session.send(
+                t0 = time.monotonic()
+                r = await media_session.send(
                     raw.functions.upload.GetFile(location=location, offset=off, limit=CHUNK_SIZE)
                 )
+                dt = time.monotonic() - t0
+                stats["fetch_time"] += dt
+                stats["calls"] += 1
+                if stats["first_latency"] is None:
+                    stats["first_latency"] = dt
+                if isinstance(r, raw.types.upload.File) and r.bytes:
+                    stats["fetch_bytes"] += len(r.bytes)
+                return r
             except FloodWait as e:
                 wait = int(getattr(e, "value", 0) or 0)
                 if wait > MAX_FLOOD_WAIT:
@@ -146,4 +161,13 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
     finally:
         if next_req is not None:
             next_req.cancel()
+        ft = stats["fetch_time"]
+        if stats["calls"] and ft > 0 and stats["fetch_bytes"]:
+            mib = stats["fetch_bytes"] / (1024 * 1024)
+            log.info(
+                "tg-fetch: %.1f MiB in %.2fs = %.1f MiB/s (%.0f Mbit/s) | "
+                "first-chunk %.0f ms | %d calls | dc=%s",
+                mib, ft, mib / ft, (mib * 8) / ft,
+                (stats["first_latency"] or 0) * 1000, stats["calls"], file_id.dc_id,
+            )
     return written
