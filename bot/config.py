@@ -20,6 +20,7 @@ class Config:
     upi_id: str = ""            # UPI ID for payments; empty disables purchases
     admin_group_id: int = 0     # group where payment requests are posted (0 = DM admins)
     support_link: str = "https://t.me/alaska_in"  # "Contact Support" button target
+    start_image: str = ""       # /start banner image (URL or local path); empty = text only
     razorpay_key_id: str = ""        # Razorpay Standard Checkout key id
     razorpay_key_secret: str = ""    # Razorpay key secret (server-side only)
     razorpay_webhook_secret: str = ""  # optional webhook signing secret
@@ -110,6 +111,7 @@ def load_config() -> Config:
         upi_id=os.environ.get("UPI_ID", "").strip(),
         admin_group_id=int(os.environ.get("ADMIN_GROUP_ID", "0") or "0"),
         support_link=os.environ.get("SUPPORT_LINK", "https://t.me/alaska_in").strip(),
+        start_image=os.environ.get("START_IMAGE", "").strip(),
         razorpay_key_id=os.environ.get("RAZORPAY_KEY_ID", "").strip(),
         razorpay_key_secret=os.environ.get("RAZORPAY_KEY_SECRET", "").strip(),
         razorpay_webhook_secret=os.environ.get("RAZORPAY_WEBHOOK_SECRET", "").strip(),
