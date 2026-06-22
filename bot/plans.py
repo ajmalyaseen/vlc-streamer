@@ -7,12 +7,8 @@ VALIDITY_DAYS = 30
 GB = 1024 * 1024 * 1024
 
 # --- UI theme -------------------------------------------------------------
-# Matches handlers.py: ❄ key lines + <blockquote> headers, HTML parse mode.
+# Matches handlers.py: ❄ key lines + bold headers, HTML parse mode.
 SNOW = "❄"
-
-
-def _bq(text: str) -> str:
-    return f"<blockquote>{text}</blockquote>"
 
 
 @dataclass(frozen=True)
@@ -69,14 +65,14 @@ def plan_line(p: Plan) -> str:
 
 def format_plans_text(plans: dict) -> str:
     return (
-        f"{_bq('💎 PREMIUM PLANS')}\n\n"
+        "<b>💎 PREMIUM PLANS</b>\n\n"
         + "\n\n".join(plan_line(plans[k]) for k in ("free", "plus", "pro"))
     )
 
 
 def purchase_text(p: Plan) -> str:
     return (
-        f"{_bq(f'{p.emoji} {p.name.upper()} PLAN')}\n\n"
+        f"<b>{p.emoji} {p.name.upper()} PLAN</b>\n\n"
         f"{SNOW} <b>Price</b> : ₹{p.price}\n"
         f"{SNOW} <b>Validity</b> : {VALIDITY_DAYS} days\n"
         f"{SNOW} <b>Daily Links</b> : {p.daily_links}\n"
