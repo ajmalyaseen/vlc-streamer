@@ -288,6 +288,28 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans) -> No
             quote=True,
         )
 
+    @app.on_message(filters.command("users") & filters.private)
+    async def on_users(_c: Client, m: Message):
+        if not _is_admin(m.from_user):
+            return
+        users = await db.all_users_detailed()
+        total = len(users)
+        # newest first (created_at may be missing for older records)
+        users_sorted = sorted(
+            users, key=lambda u: u.get("created_at") or dt.datetime.min, reverse=True
+        )
+        lines = []
+        for u in users_sorted[:20]:
+            name = u.get("first_name") or "—"
+            uname = f"@{u['username']}" if u.get("username") else ""
+            plan = (u.get("plan") or "free").title()
+            lines.append(f"• `{u['_id']}` {name} {uname} — {plan}")
+        body = "\n".join(lines) if lines else "No users yet."
+        await m.reply_text(
+            f"👥 **Users: {total}**\n\nLatest 20:\n{body}",
+            quote=True, disable_web_page_preview=True,
+        )
+
     @app.on_message(filters.command("user") & filters.private)
     async def on_user(_c: Client, m: Message):
         if not _is_admin(m.from_user):
