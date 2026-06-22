@@ -63,11 +63,11 @@ ABOUT_TEXT = (
 def welcome_text(name: str) -> str:
     safe = html.escape(name or "there")
     return (
-        f"{_bq(f'👋 Hai {safe}')}\n\n"
-        "I turn your Telegram files into direct <b>VLC streaming links</b>.\n"
-        "Send me any video (MP4 / MKV) and get a link instantly.\n\n"
-        f"{_bq('<i>For more info check 💡 HELP</i>')}\n\n"
-        f"{SNOW} Maintained by <a href=\"{CHANNEL_LINK}\">Alaska</a>"
+        f"👋 <b>Hey {safe},</b>\n\n"
+        "Your instant Telegram-to-VLC bridge. 🌉\n"
+        "Send any <b>MP4</b> or <b>MKV</b> video to this chat, and I'll "
+        "generate a high-speed streaming link right away.\n\n"
+        f"{_bq('<i>💡 Need assistance? Tap Help in the menu.</i>')}"
     )
 
 
