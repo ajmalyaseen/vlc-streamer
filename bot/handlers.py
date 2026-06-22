@@ -1,11 +1,12 @@
 import asyncio
 import datetime as dt
+import html
 import logging
 import os
 from urllib.parse import quote
 
 from pyrogram import Client, filters
-from pyrogram.enums import ChatMemberStatus
+from pyrogram.enums import ChatMemberStatus, ParseMode
 from pyrogram.errors import FloodWait, UserNotParticipant
 from pyrogram.types import (
     CallbackQuery,
@@ -18,7 +19,6 @@ from . import plans as plansmod
 from .config import Config
 from .utils import human_size, make_token
 from .backup import run_backup
-from .plans import BULLET, BRAND
 
 log = logging.getLogger("handlers")
 
@@ -28,84 +28,95 @@ VERSION = "v2.0.0"
 
 PLAN_RANK = {"free": 0, "plus": 1, "pro": 2}
 
+# --- UI theme -------------------------------------------------------------
+# Clean, card-style windows: a <blockquote> header (the vertical-bar look) plus
+# "❄ Key : Value" lines. HTML parse mode is used for every styled window.
+HTML = ParseMode.HTML
+SNOW = "❄"
+
+
+def _bq(text: str) -> str:
+    """A blockquote header — gives the framed, card-like title look."""
+    return f"<blockquote>{text}</blockquote>"
+
+
 HELP_TEXT = (
-    "**How to Use**\n\n"
-    f"{BULLET} Send me a video file (MP4 / MKV / etc.)\n"
-    f"{BULLET} I reply with a direct streaming link\n"
-    f"{BULLET} Open VLC → Media → Open Network Stream\n"
-    f"{BULLET} Paste the link and play\n\n"
-    "_Premium unlocks larger files, more daily links and longer link validity._"
+    f"{_bq('💡 HELP')}\n\n"
+    f"{SNOW} Send me a video file (MP4 / MKV)\n"
+    f"{SNOW} I reply with a direct streaming link\n"
+    f"{SNOW} Open VLC → Media → Open Network Stream\n"
+    f"{SNOW} Paste the link and play\n\n"
+    f"{_bq('<i>Premium unlocks larger files, more daily links and longer link validity.</i>')}"
 )
 
 ABOUT_TEXT = (
-    "**About**\n\n"
-    f"{BULLET} Name  —  Alaska Stream\n"
-    f"{BULLET} Framework  —  Pyrogram\n"
-    f"{BULLET} Language  —  Python\n"
-    f"{BULLET} Version  —  {VERSION}\n"
-    f"{BULLET} Developer  —  {DEVELOPER}"
+    f"{_bq('📕 BOT INFO')}\n\n"
+    f"{SNOW} <b>Bot Name</b> : Alaska Stream\n"
+    f"{SNOW} <b>Framework</b> : Pyrogram\n"
+    f"{SNOW} <b>Language</b> : Python\n"
+    f"{SNOW} <b>Version</b> : {VERSION}\n"
+    f"{SNOW} <b>Source</b> : Private\n"
+    f"{SNOW} <b>Developer</b> : {DEVELOPER}"
 )
 
 
 def welcome_text(name: str) -> str:
+    safe = html.escape(name or "there")
     return (
-        "**Alaska Stream**\n"
-        "_Telegram files to instant VLC links._\n\n"
-        f"Hi {name}, send me any video file (MP4 / MKV) "
-        "and I’ll reply with a direct streaming link.\n\n"
-        f"{BULLET} Plays in VLC on phone or PC\n"
-        f"{BULLET} Larger files & longer links with Premium\n\n"
-        f"{BRAND} Maintained by [Alaska]({CHANNEL_LINK})"
+        f"{_bq(f'👋 Hai {safe}')}\n\n"
+        "I turn your Telegram files into direct <b>VLC streaming links</b>.\n"
+        "Send me any video (MP4 / MKV) and get a link instantly.\n\n"
+        f"{_bq('<i>For more info check 💡 HELP</i>')}\n\n"
+        f"{SNOW} Maintained by <a href=\"{CHANNEL_LINK}\">Alaska</a>"
     )
 
 
 def welcome_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(f"{BRAND}  Premium Plans", callback_data="menu_plans")],
+            [InlineKeyboardButton("💎 Premium Plans", callback_data="menu_plans")],
             [
-                InlineKeyboardButton("Help", callback_data="help"),
-                InlineKeyboardButton("About", callback_data="about"),
+                InlineKeyboardButton("📊 My Plan", callback_data="menu_myplan"),
+                InlineKeyboardButton("💡 Help", callback_data="help"),
             ],
-            [InlineKeyboardButton("Manage Plan", callback_data="menu_manage")],
             [
-                InlineKeyboardButton("Updates", url=CHANNEL_LINK),
-                InlineKeyboardButton("Close", callback_data="close"),
+                InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK),
+                InlineKeyboardButton("📕 About", callback_data="about"),
             ],
+            [InlineKeyboardButton("🔐 Close", callback_data="close")],
         ]
     )
 
 
 def dashboard_text(state) -> str:
     return (
-        "**Dashboard**\n"
-        "_Convert Telegram files into VLC links instantly._\n\n"
-        f"{BULLET} Plan  —  {state.plan.name}\n"
-        f"{BULLET} Today  —  {state.used_today} / {state.plan.daily_links} links used"
+        f"{_bq('⚙️ Manage Plan')}\n\n"
+        f"{SNOW} <b>Plan</b> : {state.plan.name}\n"
+        f"{SNOW} <b>Today</b> : {state.used_today} / {state.plan.daily_links} links used"
     )
 
 
 def dashboard_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(f"{BRAND}  Premium Plans", callback_data="menu_plans")],
-            [InlineKeyboardButton("My Plan", callback_data="menu_myplan")],
-            [InlineKeyboardButton("‹  Back", callback_data="menu_home")],
+            [InlineKeyboardButton("💎 Premium Plans", callback_data="menu_plans")],
+            [InlineKeyboardButton("📊 My Plan", callback_data="menu_myplan")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_home")],
         ]
     )
 
 
 def back_home_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("‹  Back", callback_data="menu_home")]]
+        [[InlineKeyboardButton("🔙 Back", callback_data="menu_home")]]
     )
 
 
 def about_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(f"{BRAND}  Premium Plans", callback_data="menu_plans")],
-            [InlineKeyboardButton("‹  Back", callback_data="menu_home")],
+            [InlineKeyboardButton("💎 Premium Plans", callback_data="menu_plans")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_home")],
         ]
     )
 
@@ -119,14 +130,14 @@ def _expiry_str(expires_at) -> str:
 def myplan_text(state) -> str:
     p = state.plan
     lines = [
-        "**My Plan**\n",
-        f"{BULLET} Plan  —  {p.emoji} {p.name}",
-        f"{BULLET} Today  —  {state.used_today} / {p.daily_links} links",
+        f"{_bq('📊 MY PLAN')}\n",
+        f"{SNOW} <b>Plan</b> : {p.emoji} {p.name}",
+        f"{SNOW} <b>Today</b> : {state.used_today} / {p.daily_links} links",
     ]
     if p.key != "free":
-        lines.append(f"{BULLET} Valid until  —  {_expiry_str(state.expires_at)}")
-    lines.append(f"{BULLET} Max file size  —  {human_size(p.max_file_size)}")
-    lines.append(f"{BULLET} Link validity  —  {plansmod._expiry_text(p.expiry_seconds)}")
+        lines.append(f"{SNOW} <b>Valid Until</b> : {_expiry_str(state.expires_at)}")
+    lines.append(f"{SNOW} <b>Max File Size</b> : {human_size(p.max_file_size)}")
+    lines.append(f"{SNOW} <b>Link Validity</b> : {plansmod._expiry_text(p.expiry_seconds)}")
     return "\n".join(lines)
 
 
@@ -139,8 +150,8 @@ def _invite_link(cfg: Config) -> str:
 def fsub_markup(cfg: Config, file_msg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Join Channel", url=_invite_link(cfg))],
-            [InlineKeyboardButton("I've Joined  ›", callback_data=f"checksub_{file_msg_id}")],
+            [InlineKeyboardButton("📢 Join Channel", url=_invite_link(cfg))],
+            [InlineKeyboardButton("🔄 I've Joined", callback_data=f"checksub_{file_msg_id}")],
         ]
     )
 
@@ -204,17 +215,18 @@ async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> b
     watch_url = f"{cfg.base_url}/watch/{chat_id}/{msg_id}/{q}?hash={token}&exp={exp}&uid={uid}"
 
     await reply_to.reply_text(
-        "**Your stream link is ready**\n\n"
-        f"{BULLET} File  —  `{file_name}`\n"
-        f"{BULLET} Size  —  {human_size(media.file_size)}\n"
-        f"{BULLET} Plan  —  {plan.emoji} {plan.name}\n"
-        f"{BULLET} Valid  —  {plansmod._expiry_text(plan.expiry_seconds)}\n\n"
-        f"`{url}`\n\n"
-        "Tap **▶  Watch Now** to open in VLC, or paste the link in "
+        f"{_bq('✅ STREAM LINK READY')}\n\n"
+        f"{SNOW} <b>File</b> : <code>{html.escape(file_name)}</code>\n"
+        f"{SNOW} <b>Size</b> : {human_size(media.file_size)}\n"
+        f"{SNOW} <b>Plan</b> : {plan.emoji} {plan.name}\n"
+        f"{SNOW} <b>Valid</b> : {plansmod._expiry_text(plan.expiry_seconds)}\n\n"
+        f"<code>{html.escape(url)}</code>\n\n"
+        "Tap <b>▶ Watch Now</b> to open in VLC, or paste the link in "
         "VLC → Media → Open Network Stream.",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("▶  Watch Now", url=watch_url)]]
+            [[InlineKeyboardButton("▶ Watch Now", url=watch_url)]]
         ),
+        parse_mode=HTML,
         disable_web_page_preview=True,
         quote=True,
     )
@@ -247,17 +259,20 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
         """Edit a menu in place, handling both text and photo (banner) messages.
 
         /start sends a photo banner with the menu attached, so navigation must
-        edit the caption on media messages; plain text messages use edit_text."""
+        edit the caption on media messages; plain text messages use edit_text.
+        All styled windows use HTML parse mode."""
         msg = cq.message
         is_media = bool(msg.photo or msg.video or msg.document or msg.animation)
         try:
             if is_media:
-                await msg.edit_caption(caption=text, reply_markup=markup)
+                await msg.edit_caption(caption=text, reply_markup=markup, parse_mode=HTML)
             else:
-                await msg.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+                await msg.edit_text(text, reply_markup=markup, parse_mode=HTML,
+                                    disable_web_page_preview=True)
         except Exception:
             # Fallback: send a fresh message if the edit can't be applied.
-            await msg.reply_text(text, reply_markup=markup, disable_web_page_preview=True)
+            await msg.reply_text(text, reply_markup=markup, parse_mode=HTML,
+                                 disable_web_page_preview=True)
 
     # ---------------- user menus ----------------
 
@@ -270,13 +285,15 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
         image = _resolve_start_image(cfg)
         if image:
             try:
-                await m.reply_photo(image, caption=caption, reply_markup=markup, quote=True)
+                await m.reply_photo(image, caption=caption, reply_markup=markup,
+                                    parse_mode=HTML, quote=True)
                 return
             except Exception:
                 log.exception("start image send failed; falling back to text")
         await m.reply_text(
             caption,
             reply_markup=markup,
+            parse_mode=HTML,
             disable_web_page_preview=True,
             quote=True,
         )
@@ -287,6 +304,7 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
         await m.reply_text(
             plansmod.format_plans_text(plans),
             reply_markup=plansmod.buy_markup(),
+            parse_mode=HTML,
             disable_web_page_preview=True,
             quote=True,
         )
@@ -294,16 +312,17 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
     @app.on_message(filters.command("myplan") & filters.private)
     async def on_myplan(_c: Client, m: Message):
         state = await subs.get_state(m.from_user)
-        await m.reply_text(myplan_text(state), reply_markup=back_home_markup(), quote=True)
+        await m.reply_text(myplan_text(state), reply_markup=back_home_markup(),
+                           parse_mode=HTML, quote=True)
 
     @app.on_message(filters.command("help") & filters.private)
     async def on_help(_c: Client, m: Message):
-        await m.reply_text(HELP_TEXT, reply_markup=about_markup(),
+        await m.reply_text(HELP_TEXT, reply_markup=about_markup(), parse_mode=HTML,
                            disable_web_page_preview=True, quote=True)
 
     @app.on_message(filters.command("about") & filters.private)
     async def on_about(_c: Client, m: Message):
-        await m.reply_text(ABOUT_TEXT, reply_markup=about_markup(),
+        await m.reply_text(ABOUT_TEXT, reply_markup=about_markup(), parse_mode=HTML,
                            disable_web_page_preview=True, quote=True)
 
     @app.on_message(filters.command("id"))
@@ -553,10 +572,11 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
                 else f"You're already on the {plan.name} plan."
             )
             await cq.message.reply_text(
-                msg + "\n\n_If you face any issue, contact support._",
+                f"{_bq('ℹ️ NOTICE')}\n\n{msg}\n\n<i>If you face any issue, contact support.</i>",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Contact Support", url=cfg.support_link)]]
+                    [[InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)]]
                 ),
+                parse_mode=HTML,
             )
             return
         if not payments.enabled:
@@ -565,9 +585,10 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
         res = await payments.start_purchase(cq.from_user, plan_key)
         if res.blocked:
             await cq.message.reply_text(
-                "**Request already pending**\n\n"
+                f"{_bq('⏳ REQUEST PENDING')}\n\n"
                 "You have a payment request awaiting verification. "
-                "Please wait for an admin to review it before creating a new one."
+                "Please wait for an admin to review it before creating a new one.",
+                parse_mode=HTML,
             )
             return
         if res.error:
@@ -577,16 +598,16 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
         if res.provider == "razorpay":
             markup = InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton(f"Pay ₹{res.amount}  ›", url=res.pay_url)],
-                    [InlineKeyboardButton("Contact Support", url=cfg.support_link)],
+                    [InlineKeyboardButton(f"💳 Pay ₹{res.amount}", url=res.pay_url)],
+                    [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
                 ]
             )
             await cq.message.reply_text(
-                f"{plan.emoji}  **{plan.name} Plan  ·  ₹{res.amount}**\n\n"
-                f"{BULLET} Secure checkout (UPI / Card / Wallet / Netbanking)\n"
-                f"{BULLET} Plan activates automatically on success\n\n"
-                "_If you face any issue, contact support._",
-                reply_markup=markup, disable_web_page_preview=True,
+                f"{_bq(f'{plan.emoji} {plan.name.upper()} · ₹{res.amount}')}\n\n"
+                f"{SNOW} Secure checkout (UPI / Card / Wallet / Netbanking)\n"
+                f"{SNOW} Plan activates automatically on success\n\n"
+                f"{_bq('<i>If you face any issue, contact support.</i>')}",
+                reply_markup=markup, parse_mode=HTML, disable_web_page_preview=True,
             )
             return
 
@@ -596,18 +617,18 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
             f"&am={res.amount}&tn={quote(res.reference)}"
         )
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Open UPI App  ›", url=pay_page)],
-            [InlineKeyboardButton("Contact Support", url=cfg.support_link)],
+            [InlineKeyboardButton("💳 Open UPI App", url=pay_page)],
+            [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
         ])
         await cq.message.reply_text(
-            f"{plan.emoji}  **Pay ₹{res.amount} for {plan.name}**\n\n"
-            f"{BULLET} Reference  —  `{res.reference}`\n"
-            f"{BULLET} UPI ID  —  `{cfg.upi_id}`\n\n"
-            "Tap **Open UPI App** to pay with the amount pre-filled, "
+            f"{_bq(f'{plan.emoji} PAY ₹{res.amount} · {plan.name.upper()}')}\n\n"
+            f"{SNOW} <b>Reference</b> : <code>{res.reference}</code>\n"
+            f"{SNOW} <b>UPI ID</b> : <code>{html.escape(cfg.upi_id)}</code>\n\n"
+            "Tap <b>Open UPI App</b> to pay with the amount pre-filled, "
             "or pay manually to the UPI ID above.\n\n"
-            "After paying, send the **last 4 digits of your UTR** here to verify.\n\n"
-            "_If you face any issue, contact support._",
-            reply_markup=markup, disable_web_page_preview=True,
+            "After paying, send the <b>last 4 digits of your UTR</b> here to verify.\n\n"
+            f"{_bq('<i>If you face any issue, contact support.</i>')}",
+            reply_markup=markup, parse_mode=HTML, disable_web_page_preview=True,
         )
 
     @app.on_callback_query()
@@ -637,12 +658,12 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
             if current == "pro":
                 await _nav(
                     cq,
-                    "❖  **You're already on Pro — our highest plan.**\n\n"
-                    "There's nothing higher to upgrade to.\n"
+                    f"{_bq('🚀 ALREADY ON PRO')}\n\n"
+                    "You're on our highest plan — there's nothing higher to upgrade to.\n"
                     "If you face any issue, reach out to support.",
                     InlineKeyboardMarkup([
-                        [InlineKeyboardButton("Contact Support", url=cfg.support_link)],
-                        [InlineKeyboardButton("‹  Back", callback_data="menu_plans")],
+                        [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
+                        [InlineKeyboardButton("🔙 Back", callback_data="menu_plans")],
                     ]),
                 )
                 return
@@ -650,26 +671,26 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
             if current == plan_key:
                 await _nav(
                     cq,
-                    f"✦  **You're already on the {plans[plan_key].name} plan.**\n\n"
+                    f"{_bq(f'⭐ ALREADY ON {plans[plan_key].name.upper()}')}\n\n"
                     "Upgrade to Pro for higher limits, or contact support "
                     "if you face any issue.",
                     InlineKeyboardMarkup([
-                        [InlineKeyboardButton("❖  Upgrade to Pro", callback_data="buy_pro")],
-                        [InlineKeyboardButton("Contact Support", url=cfg.support_link)],
-                        [InlineKeyboardButton("‹  Back", callback_data="menu_plans")],
+                        [InlineKeyboardButton("🚀 Upgrade to Pro", callback_data="buy_pro")],
+                        [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
+                        [InlineKeyboardButton("🔙 Back", callback_data="menu_plans")],
                     ]),
                 )
                 return
             # Allowed: free→plus, free→pro, plus→pro.
             plan = plans[plan_key]
             markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"Pay ₹{plan.price}  ›", callback_data=f"pay_{plan_key}")],
-                [InlineKeyboardButton("Contact Support", url=cfg.support_link)],
-                [InlineKeyboardButton("‹  Back", callback_data="menu_plans")],
+                [InlineKeyboardButton(f"💳 Pay ₹{plan.price}", callback_data=f"pay_{plan_key}")],
+                [InlineKeyboardButton("💬 Contact Support", url=cfg.support_link)],
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_plans")],
             ])
             text = (
                 plansmod.purchase_text(plan)
-                + "\n\n_If you face any issue, contact support._"
+                + f"\n\n{_bq('<i>If you face any issue, contact support.</i>')}"
             )
             await _nav(cq, text, markup)
         elif data in ("pay_plus", "pay_pro"):
@@ -692,11 +713,12 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
                 try:
                     await app.send_message(
                         result["user_id"],
-                        "**Payment Verified**\n\n"
-                        f"{plan.emoji}  **{plan.name} Plan activated**\n"
-                        f"{BULLET} Valid until  —  {_expiry_str(result['expires'])}\n\n"
+                        f"{_bq('✅ PAYMENT VERIFIED')}\n\n"
+                        f"{plan.emoji} <b>{plan.name} Plan activated</b>\n"
+                        f"{SNOW} <b>Valid Until</b> : {_expiry_str(result['expires'])}\n\n"
                         f"{plansmod.benefits_text(plan)}\n\n"
-                        "_Thank you for supporting Alaska._",
+                        f"{_bq('<i>Thank you for supporting Alaska.</i>')}",
+                        parse_mode=HTML,
                     )
                 except Exception:
                     log.exception("notify approve failed")
@@ -712,9 +734,10 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
                 try:
                     await app.send_message(
                         result["user_id"],
-                        "**Payment Verification Failed**\n\n"
+                        f"{_bq('❌ VERIFICATION FAILED')}\n\n"
                         "Please check your payment details and try again. "
                         "If you believe this is a mistake, contact support.",
+                        parse_mode=HTML,
                     )
                 except Exception:
                     log.exception("notify reject failed")
@@ -757,20 +780,20 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
         plan = decision.plan
         if not decision.ok and decision.reason == "file_too_big":
             await reply_to.reply_text(
-                "**File too large for your plan**\n\n"
-                f"{BULLET} Your plan  —  {plan.name}\n"
-                f"{BULLET} Max allowed  —  {human_size(plan.max_file_size)}\n\n"
-                "_Upgrade to stream larger files._",
-                reply_markup=plansmod.upgrade_markup(), quote=True,
+                f"{_bq('⚠️ FILE TOO LARGE')}\n\n"
+                f"{SNOW} <b>Your Plan</b> : {plan.name}\n"
+                f"{SNOW} <b>Max Allowed</b> : {human_size(plan.max_file_size)}\n\n"
+                f"{_bq('<i>Upgrade to stream larger files.</i>')}",
+                reply_markup=plansmod.upgrade_markup(), parse_mode=HTML, quote=True,
             )
             return
         if not decision.ok and decision.reason == "daily_limit":
             await reply_to.reply_text(
-                "**Daily limit reached**\n\n"
-                f"{BULLET} Plan  —  {plan.name}\n"
-                f"{BULLET} Used  —  {plan.daily_links}/{plan.daily_links} links today\n\n"
-                "_Upgrade to keep generating links._",
-                reply_markup=plansmod.upgrade_markup(), quote=True,
+                f"{_bq('⚠️ DAILY LIMIT REACHED')}\n\n"
+                f"{SNOW} <b>Plan</b> : {plan.name}\n"
+                f"{SNOW} <b>Used</b> : {plan.daily_links}/{plan.daily_links} links today\n\n"
+                f"{_bq('<i>Upgrade to keep generating links.</i>')}",
+                reply_markup=plansmod.upgrade_markup(), parse_mode=HTML, quote=True,
             )
             return
         ok = await send_stream_link(client, cfg, subs, file_message, reply_to, plan)
@@ -789,10 +812,10 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
         user_id = m.from_user.id if m.from_user else 0
         if not await is_subscribed(client, cfg, user_id):
             await m.reply_text(
-                "**Access Required**\n\n"
+                f"{_bq('🔒 ACCESS REQUIRED')}\n\n"
                 "Please join our channel to use this bot.\n"
-                "After joining, tap **I've Joined** and I'll send your link.",
-                reply_markup=fsub_markup(cfg, m.id), quote=True,
+                "After joining, tap <b>I've Joined</b> and I'll send your link.",
+                reply_markup=fsub_markup(cfg, m.id), parse_mode=HTML, quote=True,
             )
             return
         await _process_file(client, m, m.from_user, m)
@@ -814,10 +837,11 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
             return
         await payments.post_to_admins(payment)
         await m.reply_text(
-            "**Payment request submitted**\n\n"
-            f"{BULLET} Plan  —  {payment['plan'].title()}\n"
-            f"{BULLET} Reference  —  `{payment['_id']}`\n"
-            f"{BULLET} UTR  —  ****{payment['utr_last4']}\n\n"
-            "_An admin will verify your payment shortly._",
+            f"{_bq('⏳ PAYMENT SUBMITTED')}\n\n"
+            f"{SNOW} <b>Plan</b> : {payment['plan'].title()}\n"
+            f"{SNOW} <b>Reference</b> : <code>{payment['_id']}</code>\n"
+            f"{SNOW} <b>UTR</b> : ****{payment['utr_last4']}\n\n"
+            f"{_bq('<i>An admin will verify your payment shortly.</i>')}",
+            parse_mode=HTML,
             quote=True,
         )
