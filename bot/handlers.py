@@ -7,6 +7,7 @@ from urllib.parse import quote
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus, ParseMode
 from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram.file_id import FileId
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -184,11 +185,16 @@ async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> b
         try:
             u = getattr(file_message, "from_user", None)
             uname = f"@{u.username}" if (u and u.username) else "—"
+            try:
+                dc_id = FileId.decode(media.file_id).dc_id
+            except Exception:
+                dc_id = "?"
             ucap = (
                 "📥 **New file streamed**\n"
                 f"👤 Name: {u.first_name if u else '—'}\n"
                 f"🔗 Username: {uname}\n"
-                f"🆔 User ID: `{u.id if u else '—'}`"
+                f"🆔 User ID: `{u.id if u else '—'}`\n"
+                f"🌐 DC: {dc_id}"
             )
             stored = await file_message.copy(cfg.log_channel, caption=ucap)
         except Exception as e:
