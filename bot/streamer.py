@@ -25,7 +25,8 @@ ALIGN = 4096              # Telegram GetFile requires offset & limit to be 4 KiB
 CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's fixed max part size (and 1 MiB block boundary)
 MAX_FLOOD_WAIT = 20       # seconds; obey short Telegram GetFile rate-limits, give up beyond this
 SEND_TIMEOUT = 10         # seconds; abandon a stuck GetFile sooner than Pyrogram's 15s and retry
-MAX_CHUNK_RETRIES = 5     # retry a chunk this many times across session disconnect/timeout
+MAX_CHUNK_RETRIES = 15    # ride out a session drop-storm (heavy seeking) instead of closing the
+                          # stream; with the capped backoff below this is a ~25s recovery window
 # How many 1 MiB GetFile requests to keep in flight per connection. A high-latency
 # link (e.g. server far from the file's DC) is throughput-starved with only one
 # chunk in flight; issuing several in parallel multiplies throughput (~N×), which
