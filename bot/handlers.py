@@ -24,7 +24,7 @@ log = logging.getLogger("handlers")
 
 DEVELOPER = "Ajmal Yaseen"
 CHANNEL_LINK = "https://t.me/alaska_in"
-VERSION = "v2.0.0"
+VERSION = "v2.2.0"
 
 PLAN_RANK = {"free": 0, "plus": 1, "pro": 2}
 
@@ -83,6 +83,7 @@ def welcome_markup() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📢 Updates", url=CHANNEL_LINK),
                 InlineKeyboardButton("ℹ️ About", callback_data="about"),
             ],
+            [InlineKeyboardButton("📣 Feedback", callback_data="feedback")],
             [InlineKeyboardButton("🔐 Close", callback_data="close")],
         ]
     )
@@ -240,8 +241,48 @@ async def send_stream_link(client, cfg, subs, file_message, reply_to, plan) -> b
 
 def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monitor=None) -> None:
 
+    # User IDs currently expected to send a feedback/report message next.
+    awaiting_feedback: set = set()
+
     def _is_admin(user) -> bool:
         return bool(user) and user.id in cfg.admins
+
+    _FEEDBACK_PROMPT = (
+        f"{_bq('📣 FEEDBACK / REPORT')}\n\n"
+        "Send your feedback or report as a single message and I'll forward it to the team.\n\n"
+        "<i>Send /cancel to abort.</i>"
+    )
+
+    async def _send_feedback(client: Client, m: Message) -> None:
+        """Forward a user's feedback message to the admins + log channel."""
+        u = m.from_user
+        uname = f"@{u.username}" if (u and u.username) else "—"
+        when = dt.datetime.utcnow().strftime("%d %b %Y %H:%M UTC")
+        text = (
+            f"{_bq('📣 NEW FEEDBACK')}\n\n"
+            f"{SNOW} <b>Name</b> : {html.escape(u.first_name or '—')}\n"
+            f"{SNOW} <b>Username</b> : {html.escape(uname)}\n"
+            f"{SNOW} <b>User ID</b> : <code>{u.id}</code>\n"
+            f"{SNOW} <b>Time</b> : {when}\n\n"
+            f"{html.escape(m.text)}"
+        )
+        targets = []
+        if cfg.log_channel:
+            targets.append(cfg.log_channel)
+        if cfg.admin_group_id:
+            targets.append(cfg.admin_group_id)
+        else:
+            targets.extend(cfg.admins)
+        for t in targets:
+            try:
+                await client.send_message(t, text, parse_mode=HTML,
+                                          disable_web_page_preview=True)
+            except Exception:
+                log.exception("feedback delivery to %s failed", t)
+        await m.reply_text(
+            f"{_bq('✅ FEEDBACK SENT')}\n\nThank you — your message has been forwarded to the team.",
+            parse_mode=HTML, quote=True,
+        )
 
     async def _nav(cq: CallbackQuery, text: str, markup=None) -> None:
         """Edit a menu in place, handling both text and photo (banner) messages.
@@ -302,6 +343,17 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
     async def on_about(_c: Client, m: Message):
         await m.reply_text(ABOUT_TEXT, reply_markup=about_markup(), parse_mode=HTML,
                            disable_web_page_preview=True, quote=True)
+
+    @app.on_message(filters.command("feedback") & filters.private)
+    async def on_feedback_cmd(_c: Client, m: Message):
+        awaiting_feedback.add(m.from_user.id)
+        await m.reply_text(_FEEDBACK_PROMPT, parse_mode=HTML, quote=True)
+
+    @app.on_message(filters.command("cancel") & filters.private)
+    async def on_cancel(_c: Client, m: Message):
+        if m.from_user.id in awaiting_feedback:
+            awaiting_feedback.discard(m.from_user.id)
+            await m.reply_text("Cancelled.", quote=True)
 
     @app.on_message(filters.command("id"))
     async def on_id(_c: Client, m: Message):
@@ -725,6 +777,11 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
                 await cq.message.delete()
             except Exception:
                 pass
+        elif data == "feedback":
+            awaiting_feedback.add(cq.from_user.id)
+            await cq.answer()
+            await cq.message.reply_text(_FEEDBACK_PROMPT, parse_mode=HTML)
+            return
         elif data.startswith("checksub_"):
             file_msg_id = int(data.split("_", 1)[1])
             if not await is_subscribed(_c, cfg, cq.from_user.id):
@@ -803,6 +860,11 @@ def register_handlers(app: Client, cfg: Config, db, subs, payments, plans, monit
     @app.on_message(filters.private & filters.text & ~filters.via_bot)
     async def on_text(client: Client, m: Message):
         if not m.text or m.text.startswith("/"):
+            return
+        # Feedback takes priority: if the user tapped Feedback, forward their message.
+        if m.from_user.id in awaiting_feedback:
+            awaiting_feedback.discard(m.from_user.id)
+            await _send_feedback(client, m)
             return
         pending = await db.get_pending_payment(m.from_user.id)
         if not pending or pending["status"] != "awaiting_utr":

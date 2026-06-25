@@ -38,6 +38,7 @@ BOT_COMMANDS = [
     BotCommand("start", "Check if the bot is alive"),
     BotCommand("plans", "View Premium plans"),
     BotCommand("myplan", "View your current plan"),
+    BotCommand("feedback", "Send feedback or report an issue"),
     BotCommand("help", "How to use the bot"),
     BotCommand("about", "Know about the bot"),
 ]
