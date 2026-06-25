@@ -24,6 +24,8 @@ log = logging.getLogger("streamer")
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's fixed max part size
 MAX_FLOOD_WAIT = 20       # seconds; obey short Telegram GetFile rate-limits, give up beyond this
+SEND_TIMEOUT = 10         # seconds; abandon a stuck GetFile sooner than Pyrogram's 15s and retry
+MAX_CHUNK_RETRIES = 5     # retry a chunk this many times across session disconnect/timeout
 # How many 1 MiB GetFile requests to keep in flight per connection. A high-latency
 # link (e.g. server far from the file's DC) is throughput-starved with only one
 # chunk in flight; issuing several in parallel multiplies throughput (~N×), which
@@ -119,13 +121,18 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
     stats = {"fetch_time": 0.0, "fetch_bytes": 0, "first_latency": None, "calls": 0}
 
     async def _fetch_chunk(off: int):
-        # Obey short Telegram GetFile rate-limits (FloodWait) instead of dropping
-        # the connection — turns heavy-load floods into a brief pause, not a failure.
+        # Obey short Telegram GetFile rate-limits (FloodWait) and survive session
+        # disconnects/timeouts (common under heavy seeking) by retrying the chunk
+        # instead of letting the error kill the whole stream.
+        attempts = 0
         while True:
             try:
                 t0 = time.monotonic()
-                r = await media_session.send(
-                    raw.functions.upload.GetFile(location=location, offset=off, limit=CHUNK_SIZE)
+                r = await asyncio.wait_for(
+                    media_session.send(
+                        raw.functions.upload.GetFile(location=location, offset=off, limit=CHUNK_SIZE)
+                    ),
+                    timeout=SEND_TIMEOUT,
                 )
                 dt = time.monotonic() - t0
                 stats["fetch_time"] += dt
@@ -140,6 +147,15 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
                 if wait > MAX_FLOOD_WAIT:
                     raise
                 await asyncio.sleep(wait + 1)
+            except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError) as e:
+                # Session likely dropped/reconnecting (heavy seeking). Back off
+                # briefly and retry on the same (reconnected) session.
+                attempts += 1
+                if attempts > MAX_CHUNK_RETRIES:
+                    raise
+                log.warning("chunk fetch retry %d/%d at offset %d (%s)",
+                            attempts, MAX_CHUNK_RETRIES, off, type(e).__name__)
+                await asyncio.sleep(min(0.5 * attempts, 2.0))
 
     def _fetch(off: int):
         return asyncio.ensure_future(_fetch_chunk(off))
