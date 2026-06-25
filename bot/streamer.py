@@ -33,17 +33,32 @@ MAX_CHUNK_RETRIES = 5     # retry a chunk this many times across session disconn
 # the STREAM_PIPELINE env var; 6 is a safe default that rarely triggers FloodWait.
 PIPELINE_DEPTH = max(1, int(os.environ.get("STREAM_PIPELINE", "6") or "6"))
 
-
-def _round_align(n: int) -> int:
-    """Clamp n to a valid GetFile size: a 4 KiB multiple in (0, CHUNK_SIZE]."""
-    n -= n % ALIGN
-    return max(ALIGN, min(CHUNK_SIZE, n))
+# Valid GetFile `limit` values: divisors of 1 MiB (4 KiB … 1 MiB), descending.
+# Telegram requires `limit` to be one of these AND `offset % limit == 0`.
+_DIVISORS = (1048576, 524288, 262144, 131072, 65536, 32768, 16384, 8192, 4096)
 
 
-# Size of the FIRST chunk fetched right after a seek. Smaller = the first frame
-# arrives sooner (lower seek latency); steady chunks stay 1 MiB for throughput.
-# Tunable via STREAM_FIRST_CHUNK (bytes). Default 256 KiB.
-FIRST_CHUNK = _round_align(int(os.environ.get("STREAM_FIRST_CHUNK", str(256 * 1024)) or (256 * 1024)))
+def _snap_divisor(n: int) -> int:
+    """Largest 1 MiB-divisor <= n (min 4 KiB)."""
+    for d in _DIVISORS:
+        if d <= n:
+            return d
+    return 4096
+
+
+def _largest_div(pos: int, cap: int) -> int:
+    """Largest 1 MiB-divisor d <= cap that divides pos (so offset % d == 0)."""
+    for d in _DIVISORS:
+        if d <= cap and pos % d == 0:
+            return d
+    return 4096
+
+
+# Size of the FIRST chunk fetched right after a seek (a 1 MiB-divisor). Smaller =
+# the first frame arrives sooner (lower seek latency) with less wasted
+# pre-download; steady chunks ramp up to 1 MiB for throughput. Tunable via
+# STREAM_FIRST_CHUNK (bytes). Default 64 KiB.
+FIRST_CHUNK = _snap_divisor(int(os.environ.get("STREAM_FIRST_CHUNK", str(64 * 1024)) or (64 * 1024)))
 
 
 async def get_media_session(client: Client, file_id: FileId) -> Session:
@@ -111,22 +126,26 @@ def _plan_parts(start: int, end: int):
     """Build the GetFile plan for byte range [start, end] (inclusive).
 
     Returns a list of (offset, limit, lo, hi): fetch `limit` bytes at `offset`,
-    emit returned[lo:hi]. Guarantees for every part (Telegram GetFile rules):
-    offset % 4096 == 0, limit % 4096 == 0, 0 < limit <= CHUNK_SIZE, and the range
-    [offset, offset+limit) lies within a single 1 MiB block. The first part uses
-    the small FIRST_CHUNK size (fast seek start); the rest ramp to 1 MiB."""
+    emit returned[lo:hi]. Every part satisfies Telegram's GetFile rules: `limit`
+    is a divisor of 1 MiB and `offset % limit == 0` (which also keeps the range
+    inside one 1 MiB block and offset 4 KiB-aligned). The first part uses the
+    small FIRST_CHUNK size for a fast seek start; later parts ramp up to 1 MiB as
+    the position aligns to bigger divisors."""
     parts = []
     pos = start
     first = True
     while pos <= end:
-        aoff = pos - (pos % ALIGN)                              # 4 KiB-aligned offset <= pos
-        block_end = ((aoff // CHUNK_SIZE) + 1) * CHUNK_SIZE     # next 1 MiB boundary
-        limit = min(FIRST_CHUNK if first else CHUNK_SIZE, block_end - aoff)
-        lo = pos - aoff                                         # skip bytes before the seek point
-        hi = min(end, aoff + limit - 1) - aoff + 1             # exclusive end of useful bytes
-        parts.append((aoff, limit, lo, hi))
-        pos = aoff + limit                                     # next pos is 4 KiB-aligned
-        first = False
+        if first:
+            limit = FIRST_CHUNK
+            offset = (pos // limit) * limit       # aligned down to the first-chunk size
+            first = False
+        else:
+            limit = _largest_div(pos, CHUNK_SIZE)  # pos is aligned; pick biggest valid limit
+            offset = pos
+        lo = pos - offset                          # front bytes to skip (only first part > 0)
+        hi = min(end, offset + limit - 1) - offset + 1  # exclusive end of useful bytes
+        parts.append((offset, limit, lo, hi))
+        pos = offset + limit                       # stays aligned to `limit`
     return parts
 
 
