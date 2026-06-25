@@ -150,30 +150,36 @@ def _plan_parts(start: int, end: int):
     return parts
 
 
-async def stream_to_response(client: Client, file_id: FileId, start: int, end: int, response) -> int:
-    """Stream bytes [start, end] to an aiohttp response using a warm media session.
+async def stream_to_response(pool, start: int, end: int, response) -> int:
+    """Stream bytes [start, end] to an aiohttp response, striping chunks across
+    one or more warm media sessions.
 
-    Two optimizations stack here:
-    - Adaptive fast-start: the FIRST chunk after a seek is small and 4 KiB-aligned
-      to the seek point (not the 1 MiB boundary), so the first frame arrives fast
-      with almost no wasted pre-download; steady chunks then ramp to 1 MiB.
-    - Parallel pipeline: up to PIPELINE_DEPTH GetFile requests in flight at once,
-      written in order, which multiplies throughput on a high-latency DC path.
+    `pool` is a list of (client, file_id). Chunks are round-robined across each
+    member's session, so a single stream aggregates the throughput of several
+    Telegram sessions — the key win on a high-latency DC where one session is
+    throughput-capped well below the available network path.
 
-    Lets FileReferenceExpired propagate so the caller can refresh + retry.
+    Also stacks: adaptive fast-start (small 4 KiB-aligned first chunk) + parallel
+    pipeline. Lets FileReferenceExpired propagate so the caller can refresh.
     """
-    if end < start:
+    if end < start or not pool:
         return 0
 
-    media_session = await get_media_session(client, file_id)
-    location = get_location(file_id)
+    # Resolve a warm (session, location) for each pool member.
+    fetchers = []
+    for client, fid in pool:
+        session = await get_media_session(client, fid)
+        fetchers.append((session, get_location(fid)))
+    nf = len(fetchers)
+    dc_id = pool[0][1].dc_id
 
     parts = _plan_parts(start, end)
 
-    # Telegram fetch stats for this request (GetFile speed only).
-    stats = {"fetch_time": 0.0, "fetch_bytes": 0, "first_latency": None, "calls": 0}
+    # Wall-clock fetch stats (true throughput: bytes / elapsed, not summed-per-request).
+    stats = {"fetch_bytes": 0, "first_latency": None, "calls": 0}
+    wall0 = time.monotonic()
 
-    async def _fetch_chunk(off: int, lim: int):
+    async def _fetch_chunk(off: int, lim: int, session, location):
         # Obey short Telegram GetFile rate-limits (FloodWait) and survive session
         # disconnects/timeouts (common under heavy seeking) by retrying the chunk
         # instead of letting the error kill the whole stream.
@@ -182,16 +188,14 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
             try:
                 t0 = time.monotonic()
                 r = await asyncio.wait_for(
-                    media_session.send(
+                    session.send(
                         raw.functions.upload.GetFile(location=location, offset=off, limit=lim)
                     ),
                     timeout=SEND_TIMEOUT,
                 )
-                dt = time.monotonic() - t0
-                stats["fetch_time"] += dt
-                stats["calls"] += 1
                 if stats["first_latency"] is None:
-                    stats["first_latency"] = dt
+                    stats["first_latency"] = time.monotonic() - t0
+                stats["calls"] += 1
                 if isinstance(r, raw.types.upload.File) and r.bytes:
                     stats["fetch_bytes"] += len(r.bytes)
                 return r
@@ -210,8 +214,10 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
                             attempts, MAX_CHUNK_RETRIES, off, type(e).__name__)
                 await asyncio.sleep(min(0.5 * attempts, 2.0))
 
-    def _fetch(part):
-        return asyncio.ensure_future(_fetch_chunk(part[0], part[1]))
+    def _fetch(idx: int):
+        off, lim, _lo, _hi = parts[idx]
+        session, location = fetchers[idx % nf]   # round-robin chunks across sessions
+        return asyncio.ensure_future(_fetch_chunk(off, lim, session, location))
 
     written = 0
     n = len(parts)
@@ -219,7 +225,7 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
     next_idx = 0
     # Prime the pipeline with up to PIPELINE_DEPTH concurrent requests.
     while next_idx < n and len(inflight) < PIPELINE_DEPTH:
-        inflight.append((_fetch(parts[next_idx]), parts[next_idx]))
+        inflight.append((_fetch(next_idx), parts[next_idx]))
         next_idx += 1
 
     try:
@@ -228,7 +234,7 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
             r = await fut
             # Refill the pipeline so it stays full (keeps N requests in flight).
             if next_idx < n:
-                inflight.append((_fetch(parts[next_idx]), parts[next_idx]))
+                inflight.append((_fetch(next_idx), parts[next_idx]))
                 next_idx += 1
 
             if not isinstance(r, raw.types.upload.File) or not r.bytes:
@@ -238,18 +244,17 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
             await response.write(chunk)
             written += len(chunk)
     finally:
-        # Cancel any still-in-flight fetches (client disconnected / seeked away),
-        # freeing those requests promptly instead of letting them linger.
+        # Cancel any still-in-flight fetches (client disconnected / seeked away).
         for fut, _ in inflight:
             fut.cancel()
-        ft = stats["fetch_time"]
-        if stats["calls"] and ft > 0 and stats["fetch_bytes"]:
+        wall = time.monotonic() - wall0
+        if stats["calls"] and wall > 0 and stats["fetch_bytes"]:
             mib = stats["fetch_bytes"] / (1024 * 1024)
             log.info(
                 "tg-fetch: %.1f MiB in %.2fs = %.1f MiB/s (%.0f Mbit/s) | "
-                "first-chunk %.0f ms | %d calls | dc=%s",
-                mib, ft, mib / ft, (mib * 8) / ft,
-                (stats["first_latency"] or 0) * 1000, stats["calls"], file_id.dc_id,
+                "first-chunk %.0f ms | %d calls | dc=%s | lanes=%d",
+                mib, wall, mib / wall, (mib * 8) / wall,
+                (stats["first_latency"] or 0) * 1000, stats["calls"], dc_id, nf,
             )
 
     return written

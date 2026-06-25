@@ -184,6 +184,30 @@ async def _refresh_entry(app: web.Application, ci: int, chat_id: int, msg_id: in
     return file_id
 
 
+def _build_pool(app: web.Application, chat_id: int, msg_id: int, fallback):
+    """List of (client, file_id) across every bot that already has this file's
+    reference cached — the sessions to stripe a single stream's chunks across.
+    Falls back to [fallback] (the primary client) if nothing else is warm yet."""
+    pool = []
+    cache = app["meta_cache"]
+    now = time.monotonic()
+    for cj in range(len(app["clients"])):
+        ej = cache.get((cj, chat_id, msg_id))
+        if ej and ej["expiry"] > now:
+            pool.append((app["clients"][cj], ej["file_id"]))
+    return pool or [fallback]
+
+
+async def _refresh_pool(app: web.Application, chat_id: int, msg_id: int):
+    """Refresh every cached reference for this file (on FileReferenceExpired)."""
+    for cj in range(len(app["clients"])):
+        if app["meta_cache"].get((cj, chat_id, msg_id)):
+            try:
+                await _refresh_entry(app, cj, chat_id, msg_id)
+            except Exception:
+                pass
+
+
 async def stream_handler(request: web.Request) -> web.StreamResponse:
     cfg: Config = request.app["config"]
 
@@ -281,13 +305,18 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         cname = getattr(client, "name", f"client{ci}")
         log.info("stream start msg=%s client=%s range=%s-%s active=%s",
                  msg_id, cname, start, end, active)
+        # Stripe this stream's chunks across every warm bot session for this file
+        # (multi-session = aggregate throughput on a far DC). Falls back to the
+        # primary client until the prewarm has cached the others.
+        pool = _build_pool(request.app, chat_id, msg_id, (client, file_id))
         try:
             try:
-                await stream_to_response(client, file_id, start, end, response)
+                await stream_to_response(pool, start, end, response)
             except FileReferenceExpired:
-                # Reference expired: refresh + retry once (occurs before any bytes sent).
-                file_id = await _refresh_entry(request.app, ci, chat_id, msg_id)
-                await stream_to_response(client, file_id, start, end, response)
+                # A reference expired: refresh all + rebuild pool, retry once.
+                await _refresh_pool(request.app, chat_id, msg_id)
+                pool = _build_pool(request.app, chat_id, msg_id, (client, file_id))
+                await stream_to_response(pool, start, end, response)
         except (ConnectionError, asyncio.CancelledError):
             pass  # client disconnected mid-stream (normal during seeking)
         except Exception as e:
