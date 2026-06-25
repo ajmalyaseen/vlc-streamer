@@ -143,6 +143,22 @@ async def run() -> None:
     if workers:
         log.info("Started %d worker client(s) for parallel streaming", len(workers))
 
+    # Resolve the LOG_CHANNEL peer on every client. With in_memory sessions, a
+    # restart wipes each bot's knowledge of the channel; without this first
+    # resolution a bot's get_messages there fails with CHANNEL_INVALID. Bots that
+    # can't access it (not admins of the channel) are logged so you can fix it.
+    if cfg.log_channel:
+        for c in clients:
+            cname = getattr(c, "name", "?")
+            try:
+                await c.get_chat(cfg.log_channel)
+                log.info("Client %s resolved LOG_CHANNEL OK", cname)
+            except Exception as e:
+                log.warning(
+                    "Client %s CANNOT access LOG_CHANNEL %s (%s). Add this bot as "
+                    "an admin of the channel, or remove its token.", cname, cfg.log_channel, e
+                )
+
     # Register the slash-command menu shown when users type "/".
     try:
         await bot.set_bot_commands(BOT_COMMANDS)

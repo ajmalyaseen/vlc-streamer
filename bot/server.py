@@ -235,8 +235,19 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         try:
             entry = await _get_entry(request.app, ci, chat_id, msg_id)
         except Exception as e:
-            log.warning("get_messages failed for %s/%s: %s", chat_id, msg_id, e)
-            return web.Response(status=404, text="File not found")
+            log.warning("get_messages failed for %s/%s on client %s: %s", chat_id, msg_id, ci, e)
+            entry = None
+        # If the chosen worker can't read the file (e.g. not resolved / not an
+        # admin of the log channel), fall back to the main bot, which always can.
+        if entry is None and ci != 0:
+            active[ci] -= 1
+            ci = 0
+            active[ci] += 1
+            try:
+                entry = await _get_entry(request.app, ci, chat_id, msg_id)
+            except Exception as e:
+                log.warning("get_messages failed for %s/%s on main bot: %s", chat_id, msg_id, e)
+                entry = None
         if entry is None:
             return web.Response(status=404, text="File not found")
 
