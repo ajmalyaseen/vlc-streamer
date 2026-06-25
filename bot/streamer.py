@@ -10,7 +10,6 @@ Based on the well-known TG-FileStreamBot ByteStreamer pattern.
 """
 import asyncio
 import logging
-import math
 import os
 import time
 from collections import deque
@@ -22,7 +21,8 @@ from pyrogram.session import Auth, Session
 
 log = logging.getLogger("streamer")
 
-CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's fixed max part size
+ALIGN = 4096              # Telegram GetFile requires offset & limit to be 4 KiB-aligned
+CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's fixed max part size (and 1 MiB block boundary)
 MAX_FLOOD_WAIT = 20       # seconds; obey short Telegram GetFile rate-limits, give up beyond this
 SEND_TIMEOUT = 10         # seconds; abandon a stuck GetFile sooner than Pyrogram's 15s and retry
 MAX_CHUNK_RETRIES = 5     # retry a chunk this many times across session disconnect/timeout
@@ -32,6 +32,18 @@ MAX_CHUNK_RETRIES = 5     # retry a chunk this many times across session disconn
 # fixes seek stalls and the "audio plays but video freezes" symptom. Tunable via
 # the STREAM_PIPELINE env var; 6 is a safe default that rarely triggers FloodWait.
 PIPELINE_DEPTH = max(1, int(os.environ.get("STREAM_PIPELINE", "6") or "6"))
+
+
+def _round_align(n: int) -> int:
+    """Clamp n to a valid GetFile size: a 4 KiB multiple in (0, CHUNK_SIZE]."""
+    n -= n % ALIGN
+    return max(ALIGN, min(CHUNK_SIZE, n))
+
+
+# Size of the FIRST chunk fetched right after a seek. Smaller = the first frame
+# arrives sooner (lower seek latency); steady chunks stay 1 MiB for throughput.
+# Tunable via STREAM_FIRST_CHUNK (bytes). Default 256 KiB.
+FIRST_CHUNK = _round_align(int(os.environ.get("STREAM_FIRST_CHUNK", str(256 * 1024)) or (256 * 1024)))
 
 
 async def get_media_session(client: Client, file_id: FileId) -> Session:
@@ -95,14 +107,40 @@ def get_location(file_id: FileId):
     )
 
 
+def _plan_parts(start: int, end: int):
+    """Build the GetFile plan for byte range [start, end] (inclusive).
+
+    Returns a list of (offset, limit, lo, hi): fetch `limit` bytes at `offset`,
+    emit returned[lo:hi]. Guarantees for every part (Telegram GetFile rules):
+    offset % 4096 == 0, limit % 4096 == 0, 0 < limit <= CHUNK_SIZE, and the range
+    [offset, offset+limit) lies within a single 1 MiB block. The first part uses
+    the small FIRST_CHUNK size (fast seek start); the rest ramp to 1 MiB."""
+    parts = []
+    pos = start
+    first = True
+    while pos <= end:
+        aoff = pos - (pos % ALIGN)                              # 4 KiB-aligned offset <= pos
+        block_end = ((aoff // CHUNK_SIZE) + 1) * CHUNK_SIZE     # next 1 MiB boundary
+        limit = min(FIRST_CHUNK if first else CHUNK_SIZE, block_end - aoff)
+        lo = pos - aoff                                         # skip bytes before the seek point
+        hi = min(end, aoff + limit - 1) - aoff + 1             # exclusive end of useful bytes
+        parts.append((aoff, limit, lo, hi))
+        pos = aoff + limit                                     # next pos is 4 KiB-aligned
+        first = False
+    return parts
+
+
 async def stream_to_response(client: Client, file_id: FileId, start: int, end: int, response) -> int:
     """Stream bytes [start, end] to an aiohttp response using a warm media session.
 
-    Parallel-pipelined: up to PIPELINE_DEPTH GetFile requests are kept in flight
-    at once and written to the client in order. On a high-latency path to the
-    file's DC this multiplies throughput vs one-chunk-at-a-time, which is what
-    fixes seek stalls / "audio plays but video frozen". Lets FileReferenceExpired
-    propagate so the caller can refresh + retry.
+    Two optimizations stack here:
+    - Adaptive fast-start: the FIRST chunk after a seek is small and 4 KiB-aligned
+      to the seek point (not the 1 MiB boundary), so the first frame arrives fast
+      with almost no wasted pre-download; steady chunks then ramp to 1 MiB.
+    - Parallel pipeline: up to PIPELINE_DEPTH GetFile requests in flight at once,
+      written in order, which multiplies throughput on a high-latency DC path.
+
+    Lets FileReferenceExpired propagate so the caller can refresh + retry.
     """
     if end < start:
         return 0
@@ -110,17 +148,12 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
     media_session = await get_media_session(client, file_id)
     location = get_location(file_id)
 
-    offset = start - (start % CHUNK_SIZE)
-    first_part_cut = start - offset
-    last_part_cut = (end % CHUNK_SIZE) + 1
-    part_count = math.ceil((end + 1) / CHUNK_SIZE) - math.floor(offset / CHUNK_SIZE)
+    parts = _plan_parts(start, end)
 
-    # Telegram fetch stats for this request (measures the GetFile speed only,
-    # i.e. how fast the server pulls bytes FROM Telegram, excluding the time
-    # spent writing to the viewer's socket).
+    # Telegram fetch stats for this request (GetFile speed only).
     stats = {"fetch_time": 0.0, "fetch_bytes": 0, "first_latency": None, "calls": 0}
 
-    async def _fetch_chunk(off: int):
+    async def _fetch_chunk(off: int, lim: int):
         # Obey short Telegram GetFile rate-limits (FloodWait) and survive session
         # disconnects/timeouts (common under heavy seeking) by retrying the chunk
         # instead of letting the error kill the whole stream.
@@ -130,7 +163,7 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
                 t0 = time.monotonic()
                 r = await asyncio.wait_for(
                     media_session.send(
-                        raw.functions.upload.GetFile(location=location, offset=off, limit=CHUNK_SIZE)
+                        raw.functions.upload.GetFile(location=location, offset=off, limit=lim)
                     ),
                     timeout=SEND_TIMEOUT,
                 )
@@ -157,45 +190,37 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
                             attempts, MAX_CHUNK_RETRIES, off, type(e).__name__)
                 await asyncio.sleep(min(0.5 * attempts, 2.0))
 
-    def _fetch(off: int):
-        return asyncio.ensure_future(_fetch_chunk(off))
+    def _fetch(part):
+        return asyncio.ensure_future(_fetch_chunk(part[0], part[1]))
 
     written = 0
-    # Offsets of every 1 MiB part we need, in order.
-    offsets = [offset + i * CHUNK_SIZE for i in range(part_count)]
+    n = len(parts)
     inflight = deque()
     next_idx = 0
     # Prime the pipeline with up to PIPELINE_DEPTH concurrent requests.
-    while next_idx < part_count and len(inflight) < PIPELINE_DEPTH:
-        inflight.append(_fetch(offsets[next_idx]))
+    while next_idx < n and len(inflight) < PIPELINE_DEPTH:
+        inflight.append((_fetch(parts[next_idx]), parts[next_idx]))
         next_idx += 1
 
-    current_part = 0
     try:
         while inflight:
-            r = await inflight.popleft()
-            current_part += 1
+            fut, part = inflight.popleft()
+            r = await fut
             # Refill the pipeline so it stays full (keeps N requests in flight).
-            if next_idx < part_count:
-                inflight.append(_fetch(offsets[next_idx]))
+            if next_idx < n:
+                inflight.append((_fetch(parts[next_idx]), parts[next_idx]))
                 next_idx += 1
 
             if not isinstance(r, raw.types.upload.File) or not r.bytes:
                 break
-            chunk = r.bytes
-            if part_count == 1:
-                chunk = chunk[first_part_cut:last_part_cut]
-            elif current_part == 1:
-                chunk = chunk[first_part_cut:]
-            elif current_part == part_count:
-                chunk = chunk[:last_part_cut]
-
+            _aoff, _lim, lo, hi = part
+            chunk = r.bytes[lo:hi]
             await response.write(chunk)
             written += len(chunk)
     finally:
         # Cancel any still-in-flight fetches (client disconnected / seeked away),
         # freeing those requests promptly instead of letting them linger.
-        for fut in inflight:
+        for fut, _ in inflight:
             fut.cancel()
         ft = stats["fetch_time"]
         if stats["calls"] and ft > 0 and stats["fetch_bytes"]:
@@ -206,4 +231,6 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
                 mib, ft, mib / ft, (mib * 8) / ft,
                 (stats["first_latency"] or 0) * 1000, stats["calls"], file_id.dc_id,
             )
+
+    return written
     return written
