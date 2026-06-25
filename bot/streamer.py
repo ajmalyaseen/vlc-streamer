@@ -11,7 +11,9 @@ Based on the well-known TG-FileStreamBot ByteStreamer pattern.
 import asyncio
 import logging
 import math
+import os
 import time
+from collections import deque
 
 from pyrogram import Client, raw
 from pyrogram.errors import AuthBytesInvalid, FloodWait
@@ -22,6 +24,12 @@ log = logging.getLogger("streamer")
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB — Telegram's fixed max part size
 MAX_FLOOD_WAIT = 20       # seconds; obey short Telegram GetFile rate-limits, give up beyond this
+# How many 1 MiB GetFile requests to keep in flight per connection. A high-latency
+# link (e.g. server far from the file's DC) is throughput-starved with only one
+# chunk in flight; issuing several in parallel multiplies throughput (~N×), which
+# fixes seek stalls and the "audio plays but video freezes" symptom. Tunable via
+# the STREAM_PIPELINE env var; 6 is a safe default that rarely triggers FloodWait.
+PIPELINE_DEPTH = max(1, int(os.environ.get("STREAM_PIPELINE", "6") or "6"))
 
 
 async def get_media_session(client: Client, file_id: FileId) -> Session:
@@ -88,9 +96,11 @@ def get_location(file_id: FileId):
 async def stream_to_response(client: Client, file_id: FileId, start: int, end: int, response) -> int:
     """Stream bytes [start, end] to an aiohttp response using a warm media session.
 
-    Pipelined: the next chunk is fetched from Telegram while the current chunk is
-    being written to the client, so the socket isn't idle waiting on Telegram.
-    Lets FileReferenceExpired propagate so the caller can refresh + retry.
+    Parallel-pipelined: up to PIPELINE_DEPTH GetFile requests are kept in flight
+    at once and written to the client in order. On a high-latency path to the
+    file's DC this multiplies throughput vs one-chunk-at-a-time, which is what
+    fixes seek stalls / "audio plays but video frozen". Lets FileReferenceExpired
+    propagate so the caller can refresh + retry.
     """
     if end < start:
         return 0
@@ -135,16 +145,24 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
         return asyncio.ensure_future(_fetch_chunk(off))
 
     written = 0
-    next_req = _fetch(offset)
+    # Offsets of every 1 MiB part we need, in order.
+    offsets = [offset + i * CHUNK_SIZE for i in range(part_count)]
+    inflight = deque()
+    next_idx = 0
+    # Prime the pipeline with up to PIPELINE_DEPTH concurrent requests.
+    while next_idx < part_count and len(inflight) < PIPELINE_DEPTH:
+        inflight.append(_fetch(offsets[next_idx]))
+        next_idx += 1
+
+    current_part = 0
     try:
-        for current_part in range(1, part_count + 1):
-            r = await next_req
-            # Kick off the next fetch BEFORE writing, so Telegram I/O overlaps the socket write.
-            if current_part < part_count:
-                offset += CHUNK_SIZE
-                next_req = _fetch(offset)
-            else:
-                next_req = None
+        while inflight:
+            r = await inflight.popleft()
+            current_part += 1
+            # Refill the pipeline so it stays full (keeps N requests in flight).
+            if next_idx < part_count:
+                inflight.append(_fetch(offsets[next_idx]))
+                next_idx += 1
 
             if not isinstance(r, raw.types.upload.File) or not r.bytes:
                 break
@@ -159,8 +177,10 @@ async def stream_to_response(client: Client, file_id: FileId, start: int, end: i
             await response.write(chunk)
             written += len(chunk)
     finally:
-        if next_req is not None:
-            next_req.cancel()
+        # Cancel any still-in-flight fetches (client disconnected / seeked away),
+        # freeing those requests promptly instead of letting them linger.
+        for fut in inflight:
+            fut.cancel()
         ft = stats["fetch_time"]
         if stats["calls"] and ft > 0 and stats["fetch_bytes"]:
             mib = stats["fetch_bytes"] / (1024 * 1024)
