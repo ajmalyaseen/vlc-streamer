@@ -107,20 +107,38 @@ def _extract_media(message: Message):
 
 
 def _select_client_index(app: web.Application, chat_id: int, msg_id: int) -> int:
-    """Pick a client for this file. Workers can only read LOG_CHANNEL files, so
-    they're only eligible when the file lives in the log channel.
+    """Pick the least-busy eligible client for this request. Workers can only read
+    LOG_CHANNEL files, so they're only eligible when the file is in the log channel.
 
-    Sticky-per-file: the same file (msg_id) always maps to the same bot, so that
-    bot's warm media session + cached reference are reused across ALL of a file's
-    Range requests (including the parallel connections VLC opens on a seek). On a
-    single VM, all bots share one network pipe to Telegram, so spreading a single
-    file across bots adds no bandwidth — only redundant reference fetches. Sticky
-    avoids that while still spreading DIFFERENT files across bots."""
+    Spreading a file's parallel/seek connections across all bots keeps any single
+    media session from being flooded (continuous seeking was overloading one
+    session and making Telegram drop it). Every bot is pre-warmed AND has the
+    file reference pre-cached on first play, so a spread connection pays neither a
+    cold handshake nor a get_messages round-trip. Tie-break by msg_id for a stable
+    home bot under no load."""
     cfg: Config = app["config"]
     clients = app["clients"]
     if len(clients) > 1 and cfg.log_channel and chat_id == cfg.log_channel:
-        return msg_id % len(clients)
+        active = app["active"]
+        return min(range(len(clients)), key=lambda i: (active[i], (i - msg_id) % len(clients)))
     return 0  # only the main bot can read non-log-channel files
+
+
+async def _prewarm_all(app: web.Application, chat_id: int, msg_id: int) -> None:
+    """Warm every bot for this file once: cache its reference (get_messages) AND
+    open its media session. After this, least-busy routing can send a seek to any
+    bot with no get_messages latency and no cold handshake — fast and stable."""
+    from .streamer import get_media_session
+
+    async def _warm(ci: int):
+        try:
+            entry = await _get_entry(app, ci, chat_id, msg_id)
+            if entry:
+                await get_media_session(app["clients"][ci], entry["file_id"])
+        except Exception:
+            log.warning("prewarm failed for client %s (non-fatal)", ci, exc_info=True)
+
+    await asyncio.gather(*(_warm(i) for i in range(len(app["clients"]))))
 
 
 async def _get_entry(app: web.Application, ci: int, chat_id: int, msg_id: int):
@@ -166,6 +184,30 @@ async def _refresh_entry(app: web.Application, ci: int, chat_id: int, msg_id: in
     return file_id
 
 
+def _build_pool(app: web.Application, chat_id: int, msg_id: int, fallback):
+    """List of (client, file_id) across every bot that already has this file's
+    reference cached — the sessions to stripe a single stream's chunks across.
+    Falls back to [fallback] (the primary client) if nothing else is warm yet."""
+    pool = []
+    cache = app["meta_cache"]
+    now = time.monotonic()
+    for cj in range(len(app["clients"])):
+        ej = cache.get((cj, chat_id, msg_id))
+        if ej and ej["expiry"] > now:
+            pool.append((app["clients"][cj], ej["file_id"]))
+    return pool or [fallback]
+
+
+async def _refresh_pool(app: web.Application, chat_id: int, msg_id: int):
+    """Refresh every cached reference for this file (on FileReferenceExpired)."""
+    for cj in range(len(app["clients"])):
+        if app["meta_cache"].get((cj, chat_id, msg_id)):
+            try:
+                await _refresh_entry(app, cj, chat_id, msg_id)
+            except Exception:
+                pass
+
+
 async def stream_handler(request: web.Request) -> web.StreamResponse:
     cfg: Config = request.app["config"]
 
@@ -197,6 +239,15 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
             return web.Response(status=404, text="File not found")
         if entry is None:
             return web.Response(status=404, text="File not found")
+
+        # On the first request for this file, warm all bots in the background
+        # (reference + session) so least-busy routing can spread seek connections
+        # across them with no per-bot get_messages latency or cold handshake.
+        if len(request.app["clients"]) > 1:
+            warmed = request.app.setdefault("warmed_files", set())
+            if msg_id not in warmed:
+                warmed.add(msg_id)
+                asyncio.ensure_future(_prewarm_all(request.app, chat_id, msg_id))
 
         file_size = entry["size"]
         mime = entry["mime"]
@@ -254,13 +305,18 @@ async def stream_handler(request: web.Request) -> web.StreamResponse:
         cname = getattr(client, "name", f"client{ci}")
         log.info("stream start msg=%s client=%s range=%s-%s active=%s",
                  msg_id, cname, start, end, active)
+        # Stripe this stream's chunks across every warm bot session for this file
+        # (multi-session = aggregate throughput on a far DC). Falls back to the
+        # primary client until the prewarm has cached the others.
+        pool = _build_pool(request.app, chat_id, msg_id, (client, file_id))
         try:
             try:
-                await stream_to_response(client, file_id, start, end, response)
+                await stream_to_response(pool, start, end, response)
             except FileReferenceExpired:
-                # Reference expired: refresh + retry once (occurs before any bytes sent).
-                file_id = await _refresh_entry(request.app, ci, chat_id, msg_id)
-                await stream_to_response(client, file_id, start, end, response)
+                # A reference expired: refresh all + rebuild pool, retry once.
+                await _refresh_pool(request.app, chat_id, msg_id)
+                pool = _build_pool(request.app, chat_id, msg_id, (client, file_id))
+                await stream_to_response(pool, start, end, response)
         except (ConnectionError, asyncio.CancelledError):
             pass  # client disconnected mid-stream (normal during seeking)
         except Exception as e:
