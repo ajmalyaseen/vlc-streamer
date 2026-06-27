@@ -176,15 +176,22 @@ async def stream_to_response(pool, start: int, end: int, response) -> int:
     parts = _plan_parts(start, end)
 
     # Wall-clock fetch stats (true throughput: bytes / elapsed, not summed-per-request).
-    stats = {"fetch_bytes": 0, "first_latency": None, "calls": 0}
+    stats = {"fetch_bytes": 0, "first_latency": None, "calls": 0, "failovers": 0}
     wall0 = time.monotonic()
 
-    async def _fetch_chunk(off: int, lim: int, session, location):
-        # Obey short Telegram GetFile rate-limits (FloodWait) and survive session
-        # disconnects/timeouts (common under heavy seeking) by retrying the chunk
-        # instead of letting the error kill the whole stream.
+    async def _fetch_chunk(off: int, lim: int, lane: int):
+        # Fetch one chunk with cross-session FAILOVER. The chunk starts on its
+        # round-robin `lane`, but if that session times out / drops / is
+        # rate-limited, we immediately rotate to the NEXT bot session instead of
+        # waiting on the (possibly reconnecting) one. On a far DC like Amsterdam,
+        # individual sessions disconnect under sustained load; since output is
+        # written in byte order, a single stalled chunk would otherwise block
+        # every completed chunk behind it (head-of-line blocking) and drain VLC's
+        # buffer → mid-stream stall. Failover keeps the stream fed from a healthy
+        # sibling session within ~SEND_TIMEOUT instead of ~25s on a dead lane.
         attempts = 0
         while True:
+            session, location = fetchers[lane % nf]
             try:
                 t0 = time.monotonic()
                 r = await asyncio.wait_for(
@@ -201,30 +208,46 @@ async def stream_to_response(pool, start: int, end: int, response) -> int:
                 return r
             except FloodWait as e:
                 wait = int(getattr(e, "value", 0) or 0)
+                # A FloodWait is per-bot. If we have sibling sessions, hop to the
+                # next bot (different rate-limit bucket) and skip the wait entirely;
+                # only sleep when this is our last/only lane.
+                attempts += 1
+                if attempts > MAX_CHUNK_RETRIES or (nf == 1 and wait > MAX_FLOOD_WAIT):
+                    raise
+                if nf > 1:
+                    stats["failovers"] += 1
+                    lane += 1
+                    continue
                 if wait > MAX_FLOOD_WAIT:
                     raise
                 await asyncio.sleep(wait + 1)
             except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError) as e:
-                # Session likely dropped/reconnecting (heavy seeking). Back off
-                # briefly and retry on the same (reconnected) session.
+                # Session likely dropped/reconnecting (heavy seeking, far DC).
+                # Fail over to the next bot session immediately; only back off when
+                # we've cycled through every lane (all reconnecting at once).
                 attempts += 1
                 if attempts > MAX_CHUNK_RETRIES:
                     raise
-                log.warning("chunk fetch retry %d/%d at offset %d (%s)",
-                            attempts, MAX_CHUNK_RETRIES, off, type(e).__name__)
-                await asyncio.sleep(min(0.5 * attempts, 2.0))
+                stats["failovers"] += 1
+                lane += 1
+                log.warning("chunk failover %d/%d at offset %d -> lane %d (%s)",
+                            attempts, MAX_CHUNK_RETRIES, off, lane % nf, type(e).__name__)
+                if nf == 1 or attempts % nf == 0:
+                    await asyncio.sleep(min(0.5 * (attempts // max(nf, 1)), 2.0))
 
     def _fetch(idx: int):
         off, lim, _lo, _hi = parts[idx]
-        session, location = fetchers[idx % nf]   # round-robin chunks across sessions
-        return asyncio.ensure_future(_fetch_chunk(off, lim, session, location))
+        return asyncio.ensure_future(_fetch_chunk(off, lim, idx))  # idx % nf picks start lane
 
     written = 0
     n = len(parts)
     inflight = deque()
     next_idx = 0
-    # Prime the pipeline with up to PIPELINE_DEPTH concurrent requests.
-    while next_idx < n and len(inflight) < PIPELINE_DEPTH:
+    # Keep at least one request in flight per warm session (so every lane is used)
+    # and at least PIPELINE_DEPTH total. depth = max(PIPELINE_DEPTH, nf).
+    depth = max(PIPELINE_DEPTH, nf)
+    # Prime the pipeline with up to `depth` concurrent requests.
+    while next_idx < n and len(inflight) < depth:
         inflight.append((_fetch(next_idx), parts[next_idx]))
         next_idx += 1
 
@@ -252,10 +275,10 @@ async def stream_to_response(pool, start: int, end: int, response) -> int:
             mib = stats["fetch_bytes"] / (1024 * 1024)
             log.info(
                 "tg-fetch: %.1f MiB in %.2fs = %.1f MiB/s (%.0f Mbit/s) | "
-                "first-chunk %.0f ms | %d calls | dc=%s | lanes=%d",
+                "first-chunk %.0f ms | %d calls | dc=%s | lanes=%d | failovers=%d",
                 mib, wall, mib / wall, (mib * 8) / wall,
                 (stats["first_latency"] or 0) * 1000, stats["calls"], dc_id, nf,
+                stats["failovers"],
             )
 
-    return written
     return written
