@@ -24,7 +24,7 @@ log = logging.getLogger("handlers")
 
 DEVELOPER = "Ajmal Yaseen"
 CHANNEL_LINK = "https://t.me/alaska_in"
-VERSION = "v2.2.0"
+VERSION = "v2.3.0"
 
 PLAN_RANK = {"free": 0, "plus": 1, "pro": 2}
 
